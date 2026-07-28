@@ -50,6 +50,19 @@ public class VevalSdk : IVevalSdk
         return trace == null ? null : SnapshotData.FromTrace(trace);
     }
 
+    public async Task<JudgeResult> JudgeAsync(string criteria, VevalExecutionContext ctx, JudgeOptions? options = null)
+    {
+        var lastStep = ctx.Steps.LastOrDefault();
+        var payload = new
+        {
+            criteria,
+            input = lastStep?.Input ?? ctx.Input,
+            output = lastStep?.Output,
+            model = options?.Model,
+        };
+        return await _client.JudgeAsync(payload);
+    }
+
     public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx)
     {
         var diff    = SnapshotComparer.Compare(snapshot, ctx);
@@ -105,7 +118,7 @@ public class VevalSdk : IVevalSdk
         if (error != null) failures.Add($"Replay threw exception: {error}");
         foreach (var assertion in options.Assertions)
         {
-            var failure = assertion.Evaluate(ctx);
+            var failure = await assertion.EvaluateAsync(ctx);
             if (failure != null)
                 failures.Add(failure);
         }
@@ -179,7 +192,7 @@ public class VevalSdk : IVevalSdk
                 var ctx = await RunAndCaptureContextAsync(scenarioName, agent, item.Input);
                 foreach (var assertion in effectiveAssertions)
                 {
-                    var failure = assertion.Evaluate(ctx);
+                    var failure = await assertion.EvaluateAsync(ctx);
                     if (failure != null) itemResult.Failures.Add(failure);
                 }
                 itemResult.Context = ctx;

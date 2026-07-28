@@ -1,4 +1,5 @@
 import { TraceData } from "./tracing";
+import { JudgeResult } from "./assertions";
 
 export class VevalHttpClient {
   private readonly endpoint: string;
@@ -67,5 +68,20 @@ export class VevalHttpClient {
     } catch {
       // swallow silently
     }
+  }
+
+  // Unlike the other calls on this client, judgeAsync deliberately does not swallow
+  // failures — a network/API error here must surface as an assertion failure, not a
+  // silent pass. Callers are expected to catch.
+  async judgeAsync(payload: unknown): Promise<JudgeResult> {
+    const res = await fetch(`${this.endpoint}/v1/judge`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw new Error(`Judge request failed with status ${res.status}: ${await res.text()}`);
+    }
+    return (await res.json()) as JudgeResult;
   }
 }

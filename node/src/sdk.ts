@@ -11,7 +11,7 @@ import {
   ReplayOptions,
   ReplayResult,
 } from "./tracing";
-import { ITraceAssertion } from "./assertions";
+import { ITraceAssertion, JudgeResult } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 
@@ -56,6 +56,17 @@ export class VevalSdk {
 
   async getTraceAsync(traceId: string): Promise<TraceData | null> {
     return this.http.getTraceAsync(traceId);
+  }
+
+  async judgeAsync(criteria: string, ctx: VevalExecutionContext, model?: string): Promise<JudgeResult> {
+    const lastStep = ctx.steps[ctx.steps.length - 1];
+    const payload = {
+      criteria,
+      input: lastStep ? lastStep.input : ctx.input,
+      output: lastStep ? lastStep.output : null,
+      model: model ?? null,
+    };
+    return this.http.judgeAsync(payload);
   }
 
   async loadSnapshotAsync(traceId: string): Promise<SnapshotData | null> {
@@ -116,7 +127,7 @@ export class VevalSdk {
     const failures: string[] = [];
     if (error) failures.push(`Replay threw exception: ${error}`);
     for (const assertion of options?.assertions ?? []) {
-      const failure = assertion.evaluate(ctx);
+      const failure = await assertion.evaluate(ctx);
       if (failure) failures.push(failure);
     }
 
@@ -173,7 +184,7 @@ export class VevalSdk {
       } else if (item.input !== undefined) {
         const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input);
         for (const assertion of effectiveAssertions) {
-          const failure = assertion.evaluate(ctx);
+          const failure = await assertion.evaluate(ctx);
           if (failure) {
             itemResult.failures.push(failure);
             itemResult.passed = false;

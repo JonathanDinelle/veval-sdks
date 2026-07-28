@@ -2,13 +2,14 @@ import { VevalOptions } from "./options";
 import { VevalSdk } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
-import { ITraceAssertion } from "./assertions";
+import { ITraceAssertion, JudgeResult } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 
 export class VevalTestSdk extends VevalSdk {
   private _replayTrace: TraceData | null = null;
   private _lastStatus: string | null = null;
   private _lastError: string | null = null;
+  private _judgeMocks: Map<string, JudgeResult[]> = new Map();
 
   constructor(options: VevalOptions) {
     super(options);
@@ -25,6 +26,29 @@ export class VevalTestSdk extends VevalSdk {
   withReplay(trace: TraceData): this {
     this._replayTrace = trace;
     return this;
+  }
+
+  /**
+   * Registers a canned judge result for the given criteria string, so scenarios/replays
+   * using TraceAssert.judge stay deterministic and free in CI. Without a matching mock,
+   * judgeAsync throws rather than silently making a real, billed LLM call.
+   */
+  withJudgeMock(criteria: string, passed: boolean, score = 1.0, reasoning = ""): this {
+    const queue = this._judgeMocks.get(criteria) ?? [];
+    queue.push({ score, passed, reasoning });
+    this._judgeMocks.set(criteria, queue);
+    return this;
+  }
+
+  override async judgeAsync(criteria: string): Promise<JudgeResult> {
+    const queue = this._judgeMocks.get(criteria);
+    const next = queue?.shift();
+    if (next) return next;
+    throw new Error(
+      `Replay mode: no judge mock for criteria '${criteria}'. ` +
+        "Call withJudgeMock(...) before running a scenario/replay that uses " +
+        "TraceAssert.judge — this would have made a real, billed LLM call."
+    );
   }
 
   override async runAsync<T>(
@@ -130,7 +154,7 @@ export class VevalTestSdk extends VevalSdk {
           itemResult.passed = false;
         }
         for (const assertion of effectiveAssertions) {
-          const failure = assertion.evaluate(ctx);
+          const failure = await assertion.evaluate(ctx);
           if (failure) {
             itemResult.failures.push(failure);
             itemResult.passed = false;

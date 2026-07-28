@@ -53,6 +53,21 @@ class VevalSdk:
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         return await self._client.get_trace_async(trace_id)
 
+    async def judge_async(
+        self,
+        criteria: str,
+        ctx: VevalExecutionContext,
+        model: Optional[str] = None,
+    ) -> dict:
+        last_step = ctx.steps[-1] if ctx.steps else None
+        payload = {
+            "criteria": criteria,
+            "input": last_step.input if last_step else ctx.input,
+            "output": last_step.output if last_step else None,
+            "model": model,
+        }
+        return await self._client.judge_async(payload)
+
     async def load_snapshot_async(self, trace_id: str) -> Optional[SnapshotData]:
         trace = await self._client.get_trace_async(trace_id)
         return SnapshotData.from_trace(trace) if trace else None
@@ -111,7 +126,7 @@ class VevalSdk:
         if error:
             failures.append(f"Replay threw exception: {error}")
         for assertion in options.assertions:
-            failure = assertion.evaluate(ctx)
+            failure = await assertion.evaluate_async(ctx)
             if failure:
                 failures.append(failure)
 
@@ -177,7 +192,7 @@ class VevalSdk:
             elif item.input is not None:
                 ctx = await self._run_and_capture_context(scenario_name, agent, item.input)
                 for assertion in effective_assertions:
-                    failure = assertion.evaluate(ctx)
+                    failure = await assertion.evaluate_async(ctx)
                     if failure:
                         item_result.failures.append(failure)
                 item_result.context = ctx

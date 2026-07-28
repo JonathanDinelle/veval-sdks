@@ -58,6 +58,21 @@ class VevalHttpClient:
         except Exception:
             pass
 
+    async def judge_async(self, payload: Any) -> dict:
+        # Unlike the other calls on this client, judge_async deliberately does not swallow
+        # failures — a network/API error here must surface as an assertion failure, not a
+        # silent pass. Callers are expected to catch.
+        import asyncio
+        return await asyncio.get_event_loop().run_in_executor(
+            None, self._post_json, f"{self._endpoint}/v1/judge", payload
+        )
+
+    def _post_json(self, url: str, payload: Any) -> dict:
+        body = json.dumps(payload, default=str).encode("utf-8")
+        req = Request(url, data=body, headers=self._headers(), method="POST")
+        with urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def _post(self, url: str, payload: Any) -> None:
         body = json.dumps(payload, default=str).encode("utf-8")
         req = Request(url, data=body, headers=self._headers(), method="POST")

@@ -2,7 +2,17 @@ import { Step } from "./step";
 import { VevalExecutionContext } from "./context";
 
 export interface ITraceAssertion {
-  evaluate(ctx: VevalExecutionContext): string | null;
+  evaluate(ctx: VevalExecutionContext): Promise<string | null>;
+}
+
+export interface JudgeResult {
+  score: number;
+  passed: boolean;
+  reasoning: string;
+}
+
+export interface JudgeableSdk {
+  judgeAsync(criteria: string, ctx: VevalExecutionContext, model?: string): Promise<JudgeResult>;
 }
 
 function flattenSteps(steps: readonly Step[]): Step[] {
@@ -17,7 +27,7 @@ function flattenSteps(steps: readonly Step[]): Step[] {
 export const TraceAssert = {
   maxSteps(max: number): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const count = flattenSteps(ctx.steps).length;
         return count > max ? `MaxSteps: expected at most ${max} steps, got ${count}` : null;
       },
@@ -26,7 +36,7 @@ export const TraceAssert = {
 
   noErrors(): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const errors = flattenSteps(ctx.steps).filter((s) => s.status === "error");
         return errors.length > 0
           ? `NoErrors: found ${errors.length} step(s) with error status: ${errors.map((s) => s.name).join(", ")}`
@@ -37,7 +47,7 @@ export const TraceAssert = {
 
   stepExists(stepName: string): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const found = flattenSteps(ctx.steps).some((s) => s.name === stepName);
         return found ? null : `StepExists: step '${stepName}' not found`;
       },
@@ -46,7 +56,7 @@ export const TraceAssert = {
 
   maxCost(maxCost: number): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const total = flattenSteps(ctx.steps).reduce((sum, s) => sum + (s.costUsd ?? 0), 0);
         return total > maxCost ? `MaxCost: expected at most ${maxCost}, got ${total}` : null;
       },
@@ -55,7 +65,7 @@ export const TraceAssert = {
 
   maxDuration(maxMs: number): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const total = flattenSteps(ctx.steps).reduce((sum, s) => sum + (s.durationMs ?? 0), 0);
         return total > maxMs ? `MaxDuration: expected at most ${maxMs}ms, got ${total}ms` : null;
       },
@@ -64,7 +74,7 @@ export const TraceAssert = {
 
   outputContains(expected: string): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const found = flattenSteps(ctx.steps).some(
           (s) => s.output != null && String(s.output).includes(expected)
         );
@@ -75,11 +85,30 @@ export const TraceAssert = {
 
   toolCalled(toolName: string): ITraceAssertion {
     return {
-      evaluate(ctx) {
+      async evaluate(ctx) {
         const found = flattenSteps(ctx.steps).some(
           (s) => s.type === "tool" && s.name === toolName
         );
         return found ? null : `ToolCalled: no tool step named '${toolName}' was found`;
+      },
+    };
+  },
+
+  /** Scores the trace's output against a rubric using an LLM judge, evaluated server-side. */
+  judge(veval: JudgeableSdk, criteria: string, model?: string): ITraceAssertion {
+    return {
+      async evaluate(ctx) {
+        let result: JudgeResult;
+        try {
+          result = await veval.judgeAsync(criteria, ctx, model);
+        } catch (err) {
+          // Never let a network/API failure during judging silently pass a test.
+          const message = err instanceof Error ? err.message : String(err);
+          return `Judge: evaluation failed — ${message}`;
+        }
+
+        if (result.passed) return null;
+        return `Judge: ${criteria} (score ${result.score.toFixed(2)}) — ${result.reasoning}`;
       },
     };
   },

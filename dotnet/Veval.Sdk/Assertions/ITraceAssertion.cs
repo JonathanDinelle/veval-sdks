@@ -2,5 +2,5 @@ namespace Veval.Sdk.Assertions;
 
 public interface ITraceAssertion
 {
-    string? Evaluate(VevalExecutionContext ctx);
+    Task<string?> EvaluateAsync(VevalExecutionContext ctx);
 }

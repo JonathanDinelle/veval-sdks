@@ -15,6 +15,7 @@ namespace Veval.Sdk;
 public class VevalTestSdk : IVevalSdk
 {
     private readonly VevalHttpClient _reportingClient;
+    private readonly Dictionary<string, Queue<JudgeResult>> _judgeMocks = new();
     private TraceData? _replayTrace;
     private string _lastStatus = "success";
     private string? _lastError;
@@ -28,6 +29,33 @@ public class VevalTestSdk : IVevalSdk
     {
         _replayTrace = trace;
         return this;
+    }
+
+    /// <summary>
+    /// Registers a canned judge result for the given criteria string, so scenarios/replays
+    /// using TraceAssert.Judge stay deterministic and free in CI. Without a matching mock,
+    /// JudgeAsync throws rather than silently making a real, billed LLM call.
+    /// </summary>
+    public VevalTestSdk WithJudgeMock(string criteria, bool passed, double score = 1.0, string reasoning = "")
+    {
+        if (!_judgeMocks.TryGetValue(criteria, out var queue))
+        {
+            queue = new Queue<JudgeResult>();
+            _judgeMocks[criteria] = queue;
+        }
+        queue.Enqueue(new JudgeResult { Passed = passed, Score = score, Reasoning = reasoning });
+        return this;
+    }
+
+    public Task<JudgeResult> JudgeAsync(string criteria, VevalExecutionContext ctx, JudgeOptions? options = null)
+    {
+        if (_judgeMocks.TryGetValue(criteria, out var queue) && queue.Count > 0)
+            return Task.FromResult(queue.Dequeue());
+
+        throw new InvalidOperationException(
+            $"Replay mode: no judge mock for criteria '{criteria}'. " +
+            "Call WithJudgeMock(...) before running a scenario/replay that uses TraceAssert.Judge — " +
+            "this would have made a real, billed LLM call.");
     }
 
     public async Task<T> RunAsync<T>(string agentName, Func<VevalExecutionContext, Task<T>> callback, object? input = null)
@@ -129,7 +157,7 @@ public class VevalTestSdk : IVevalSdk
         if (error != null) failures.Add($"Replay threw exception: {error}");
         foreach (var a in options.Assertions)
         {
-            var f = a.Evaluate(ctx);
+            var f = await a.EvaluateAsync(ctx);
             if (f != null) failures.Add(f);
         }
 
@@ -198,7 +226,7 @@ public class VevalTestSdk : IVevalSdk
 
                 foreach (var a in effectiveAssertions)
                 {
-                    var f = a.Evaluate(ctx);
+                    var f = await a.EvaluateAsync(ctx);
                     if (f != null) itemResult.Failures.Add(f);
                 }
                 itemResult.Context = ctx;
