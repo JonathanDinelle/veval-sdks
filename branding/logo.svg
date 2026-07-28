@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 201">
+  <defs>
+
+    <!-- Left arm: bright cyan at top → deep navy at tip -->
+    <linearGradient id="grad-left" x1="0" y1="50" x2="0" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#3fe0fb"/>
+      <stop offset="35%"  stop-color="#1188ee"/>
+      <stop offset="100%" stop-color="#0a1a77"/>
+    </linearGradient>
+
+    <!-- Right arm: bright purple at top → deep blue at tip -->
+    <linearGradient id="grad-right" x1="0" y1="47" x2="0" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#cc88ff"/>
+      <stop offset="35%"  stop-color="#6633bb"/>
+      <stop offset="100%" stop-color="#1c1ed8"/>
+    </linearGradient>
+
+    <!-- Outer edge highlights, fade to nothing at tip -->
+    <linearGradient id="edge-l" x1="0" y1="50" x2="0" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#bbefff" stop-opacity="1"/>
+      <stop offset="30%"  stop-color="#55bbff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#2266bb" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="edge-r" x1="0" y1="47" x2="0" y2="128" gradientUnits="userSpaceOnUse">
+      <stop offset="0%"   stop-color="#ffddff" stop-opacity="1"/>
+      <stop offset="30%"  stop-color="#cc88ff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#6633bb" stop-opacity="0"/>
+    </linearGradient>
+
+  </defs>
+
+  <!--
+    V mark: five faces sharing a single bottom tip at (152, 128).
+
+    Outer corners:    (93, 50)  and (212, 47)
+    Shoulders:       (122, 50)  and (183, 50)
+    Notch/inner top: (140, 65)  and (166, 65)
+    Tip:             (152, 128)
+  -->
+
+  <!-- Left bright face (cyan) -->
+  <polygon points="93,50  122,50  152,128" fill="url(#grad-left)"/>
+
+  <!-- Left shadow face (dark navy) -->
+  <polygon points="122,50  140,65  152,128" fill="#0a1a3c"/>
+
+  <!-- Center body (deep navy) -->
+  <polygon points="140,65  166,65  152,128" fill="#050d28"/>
+
+  <!-- Right shadow face (dark indigo) -->
+  <polygon points="166,65  183,50  152,128" fill="#160a3c"/>
+
+  <!-- Right bright face (purple) -->
+  <polygon points="183,50  212,47  152,128" fill="url(#grad-right)"/>
+
+  <!-- Outer diagonal edge highlights, fading toward tip -->
+  <line x1="93"  y1="50"  x2="152" y2="128" stroke="url(#edge-l)" stroke-width="1.5"/>
+  <line x1="212" y1="47"  x2="152" y2="128" stroke="url(#edge-r)" stroke-width="1.5"/>
+
+  <!-- Top rim highlights on the bright arm edges -->
+  <line x1="93"  y1="50"  x2="122" y2="50"  stroke="#bbeeff" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
+  <line x1="183" y1="50"  x2="212" y2="47"  stroke="#ffddff" stroke-width="2" stroke-linecap="round" opacity="0.9"/>
+
+</svg>

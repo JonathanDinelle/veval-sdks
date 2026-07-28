@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/dotnet/">
+    <Project Path="Veval.Sdk.Tests/Veval.Sdk.Tests.csproj" />
+    <Project Path="Veval.Sdk/Veval.Sdk.csproj" />
+  </Folder>
+</Solution>
