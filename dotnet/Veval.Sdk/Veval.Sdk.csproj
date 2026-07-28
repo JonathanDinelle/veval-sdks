@@ -8,6 +8,7 @@
     <Title>Veval SDK</Title>
     <Description>Veval SDK allows testing AI Agents with a few lines.</Description>
     <PackageProjectUrl>https://veval.dev</PackageProjectUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageIcon>logo.png</PackageIcon>
     <PackageTags>evaluation;testing;ai;llm;agents;tracing;assertions;scenarios;observability;evals</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>

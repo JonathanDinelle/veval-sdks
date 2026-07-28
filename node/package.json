@@ -2,6 +2,7 @@
   "name": "veval-sdk",
   "version": "1.0.0",
   "description": "Veval SDK allows testing AI Agents with a few lines.",
+  "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
