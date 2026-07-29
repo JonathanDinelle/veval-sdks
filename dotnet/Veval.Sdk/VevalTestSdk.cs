@@ -249,6 +249,7 @@ public class VevalTestSdk : IVevalSdk
                 name = r.Item.Name ?? r.Item.TraceId ?? "item",
                 passed = r.Passed,
                 failures = r.Failures,
+                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
             }),
         });
 

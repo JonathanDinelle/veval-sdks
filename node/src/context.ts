@@ -1,11 +1,19 @@
 import { Step, StepHandle } from "./step";
 import { TraceData } from "./tracing";
 
+export interface JudgeRecord {
+  criteria: string;
+  score: number;
+  passed: boolean;
+  reasoning: string;
+}
+
 export class VevalExecutionContext {
   readonly traceId: string;
   readonly input: unknown;
   private _steps: Step[] = [];
   private _metadata: Record<string, unknown> = {};
+  private _judgments: JudgeRecord[] = [];
   private _mockOutputs: Map<string, unknown[]> | null = null;
   private _strictMockMode = false;
 
@@ -22,8 +30,16 @@ export class VevalExecutionContext {
     return this._metadata;
   }
 
+  get judgments(): readonly JudgeRecord[] {
+    return this._judgments;
+  }
+
   setMetadata(key: string, value: unknown): void {
     this._metadata[key] = value;
+  }
+
+  recordJudgment(criteria: string, score: number, passed: boolean, reasoning: string): void {
+    this._judgments.push({ criteria, score, passed, reasoning });
   }
 
   async trackStepAsync<T>(

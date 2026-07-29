@@ -23,6 +23,57 @@ public class JudgeTests
     }
 
     [Fact]
+    public async Task Judge_WhenPassed_StillRecordsJudgmentOnContext()
+    {
+        var veval = Substitute.For<IVevalSdk>();
+        veval.JudgeAsync("must be polite", Arg.Any<VevalExecutionContext>(), Arg.Any<JudgeOptions?>())
+            .Returns(new JudgeResult { Passed = true, Score = 0.95, Reasoning = "Polite and on-topic." });
+
+        var assertion = TraceAssert.Judge(veval, "must be polite");
+        var ctx = new VevalExecutionContext("tr_test", "hi");
+
+        await assertion.EvaluateAsync(ctx);
+
+        ctx.Judgments.Should().ContainSingle();
+        ctx.Judgments[0].Criteria.Should().Be("must be polite");
+        ctx.Judgments[0].Score.Should().Be(0.95);
+        ctx.Judgments[0].Passed.Should().BeTrue();
+        ctx.Judgments[0].Reasoning.Should().Be("Polite and on-topic.");
+    }
+
+    [Fact]
+    public async Task Judge_WhenFailed_StillRecordsJudgmentOnContext()
+    {
+        var veval = Substitute.For<IVevalSdk>();
+        veval.JudgeAsync("must be concise", Arg.Any<VevalExecutionContext>(), Arg.Any<JudgeOptions?>())
+            .Returns(new JudgeResult { Passed = false, Score = 0.3, Reasoning = "Answer rambles." });
+
+        var assertion = TraceAssert.Judge(veval, "must be concise");
+        var ctx = new VevalExecutionContext("tr_test", "hi");
+
+        await assertion.EvaluateAsync(ctx);
+
+        ctx.Judgments.Should().ContainSingle();
+        ctx.Judgments[0].Passed.Should().BeFalse();
+        ctx.Judgments[0].Score.Should().Be(0.3);
+    }
+
+    [Fact]
+    public async Task Judge_WhenJudgeCallThrows_DoesNotRecordJudgment()
+    {
+        var veval = Substitute.For<IVevalSdk>();
+        veval.JudgeAsync(Arg.Any<string>(), Arg.Any<VevalExecutionContext>(), Arg.Any<JudgeOptions?>())
+            .Returns<JudgeResult>(_ => throw new InvalidOperationException("Judge request failed with status 503"));
+
+        var assertion = TraceAssert.Judge(veval, "must be accurate");
+        var ctx = new VevalExecutionContext("tr_test", "hi");
+
+        await assertion.EvaluateAsync(ctx);
+
+        ctx.Judgments.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task Judge_WhenVevalReportsFailed_ReturnsFailureWithScoreAndReasoning()
     {
         var veval = Substitute.For<IVevalSdk>();
@@ -111,5 +162,29 @@ public class JudgeTests
 
         result.Passed.Should().BeTrue();
         result.Failures.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task VevalTestSdk_RunScenarioAsync_PassingJudgeItem_JudgmentSurvivesOnContext()
+    {
+        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" })
+            .WithJudgeMock("must be helpful", passed: true, score: 0.9, reasoning: "Good answer.");
+
+        var result = await testSdk.RunScenarioAsync(
+            "judge-scenario",
+            async ctx =>
+            {
+                await ctx.TrackStepAsync("answer", "hi", () => Task.FromResult("hello"));
+                return "hello";
+            },
+            scenarioAssertions: new[] { TraceAssert.Judge(testSdk, "must be helpful") },
+            items: new[] { new ScenarioItem { Name = "item-1", Input = "hi" } }
+        );
+
+        result.Results.Should().HaveCount(1);
+        result.Results[0].Passed.Should().BeTrue();
+        result.Results[0].Context.Should().NotBeNull();
+        result.Results[0].Context!.Judgments.Should().ContainSingle();
+        result.Results[0].Context!.Judgments[0].Score.Should().Be(0.9);
     }
 }

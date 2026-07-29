@@ -107,6 +107,8 @@ export const TraceAssert = {
           return `Judge: evaluation failed — ${message}`;
         }
 
+        ctx.recordJudgment(criteria, result.score, result.passed, result.reasoning);
+
         if (result.passed) return null;
         return `Judge: ${criteria} (score ${result.score.toFixed(2)}) — ${result.reasoning}`;
       },

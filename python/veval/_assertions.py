@@ -94,6 +94,8 @@ class TraceAssert:
                     # Never let a network/API failure during judging silently pass a test.
                     return f"Judge: evaluation failed — {ex}"
 
+                ctx.record_judgment(criteria, result["score"], result["passed"], result["reasoning"])
+
                 if result["passed"]:
                     return None
                 return f"Judge: {criteria} (score {result['score']:.2f}) — {result['reasoning']}"

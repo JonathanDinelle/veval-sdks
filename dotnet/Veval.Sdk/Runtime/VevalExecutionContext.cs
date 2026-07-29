@@ -2,6 +2,8 @@ using System.Text.Json;
 
 namespace Veval.Sdk;
 
+public record JudgeRecord(string Criteria, double Score, bool Passed, string Reasoning);
+
 public class VevalExecutionContext
 {
     public string TraceId { get; }
@@ -9,11 +11,13 @@ public class VevalExecutionContext
 
     private readonly List<Step> _steps = new();
     private readonly Dictionary<string, object> _metadata = new();
+    private readonly List<JudgeRecord> _judgments = new();
     private Dictionary<string, Queue<object?>>? _mockOutputs;
     private bool _strictMockMode;
 
     internal IReadOnlyList<Step> Steps => _steps;
     internal IReadOnlyDictionary<string, object> TraceMeta => _metadata;
+    internal IReadOnlyList<JudgeRecord> Judgments => _judgments;
 
     public VevalExecutionContext(string traceId, object? input)
     {
@@ -68,6 +72,9 @@ public class VevalExecutionContext
     }
 
     public void SetMetadata(string key, object value) => _metadata[key] = value;
+
+    internal void RecordJudgment(string criteria, double score, bool passed, string reasoning) =>
+        _judgments.Add(new JudgeRecord(criteria, score, passed, reasoning));
 
     internal void LoadMockOutputs(TraceData trace, bool strict = true)
     {

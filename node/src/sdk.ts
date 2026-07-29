@@ -216,6 +216,7 @@ export class VevalSdk {
         name: r.item.name ?? r.item.trace_id ?? "synthetic",
         passed: r.passed,
         failures: r.failures,
+        judgments: r.context?.judgments ?? [],
       })),
     });
 

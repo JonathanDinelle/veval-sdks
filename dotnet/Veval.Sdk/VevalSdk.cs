@@ -216,6 +216,7 @@ public class VevalSdk : IVevalSdk
                 name = r.Item.Name ?? r.Item.TraceId ?? "synthetic",
                 passed = r.Passed,
                 failures = r.Failures,
+                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
             }),
         });
 

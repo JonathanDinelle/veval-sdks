@@ -204,6 +204,8 @@ public static class TraceAssert
                 return $"Judge: evaluation failed — {ex.Message}";
             }
 
+            ctx.RecordJudgment(_criteria, result.Score, result.Passed, result.Reasoning);
+
             return result.Passed
                 ? null
                 : $"Judge: {_criteria} (score {result.Score:0.00}) — {result.Reasoning}";

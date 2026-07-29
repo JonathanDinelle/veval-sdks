@@ -210,6 +210,7 @@ class VevalSdk:
                     "name": r.item.name or r.item.trace_id or "synthetic",
                     "passed": r.passed,
                     "failures": r.failures,
+                    "judgments": r.context.judgments if r.context else [],
                 }
                 for r in scenario_result.results
             ],
