@@ -111,7 +111,7 @@ public class JudgeTests
     [Fact]
     public async Task VevalTestSdk_WithJudgeMock_ReturnsMockedResultInsteadOfCallingLive()
     {
-        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" })
+        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" })
             .WithJudgeMock("must be polite", passed: true, score: 0.88, reasoning: "Mocked pass.");
 
         var ctx = new VevalExecutionContext("tr_test", "hi");
@@ -125,7 +125,7 @@ public class JudgeTests
     [Fact]
     public async Task VevalTestSdk_WithoutJudgeMock_ThrowsInsteadOfMakingLiveCall()
     {
-        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" });
         var ctx = new VevalExecutionContext("tr_test", "hi");
 
         var act = async () => await testSdk.JudgeAsync("unmocked criteria", ctx);
@@ -137,7 +137,7 @@ public class JudgeTests
     [Fact]
     public async Task VevalTestSdk_ReplayAsync_WithJudgeAssertionAndMock_Passes()
     {
-        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" })
+        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" })
             .WithJudgeMock("must be helpful", passed: true, score: 1.0);
 
         var trace = new TraceData
@@ -167,7 +167,7 @@ public class JudgeTests
     [Fact]
     public async Task VevalTestSdk_RunScenarioAsync_PassingJudgeItem_JudgmentSurvivesOnContext()
     {
-        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" })
+        var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" })
             .WithJudgeMock("must be helpful", passed: true, score: 0.9, reasoning: "Good answer.");
 
         var result = await testSdk.RunScenarioAsync(

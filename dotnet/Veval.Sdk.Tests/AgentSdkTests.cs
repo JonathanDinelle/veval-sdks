@@ -11,7 +11,6 @@ public class AgentSdkTests
         var sdk = new VevalSdk(new VevalOptions
         {
             ApiKey = "sk_live_test",
-            Endpoint = "http://localhost:0",
         });
 
         var result = await sdk.RunAsync("test-agent", async ctx =>
@@ -29,7 +28,6 @@ public class AgentSdkTests
         var sdk = new VevalSdk(new VevalOptions
         {
             ApiKey = "sk_live_test",
-            Endpoint = "http://localhost:0",
         });
 
         VevalExecutionContext? captured = null;
@@ -53,7 +51,6 @@ public class AgentSdkTests
         var sdk = new VevalSdk(new VevalOptions
         {
             ApiKey = "sk_live_test",
-            Endpoint = "http://localhost:0",
         });
 
         var act = () => sdk.RunAsync<string>("test-agent", async ctx =>
@@ -70,7 +67,6 @@ public class AgentSdkTests
         var sdk = new VevalSdk(new VevalOptions
         {
             ApiKey = "sk_live_test",
-            Endpoint = "http://localhost:0",
         });
 
         VevalExecutionContext? captured = null;

@@ -53,7 +53,6 @@ var veval = new AgentSdk(new AgentOptions
 {
     ApiKey = "vk_...",            // Required. Your Veval API key.
     ProjectId = "my-project",     // Required. Groups traces in the dashboard.
-    Endpoint = "https://api.veval.dev", // Optional. Self-hosted override.
     FlushIntervalMs = 5000,       // Optional. Batch flush interval.
     FlushBatchSize = 50,          // Optional. Max traces per batch.
 });
