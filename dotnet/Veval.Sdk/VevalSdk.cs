@@ -59,6 +59,9 @@ public class VevalSdk : IVevalSdk
             input = lastStep?.Input ?? ctx.Input,
             output = lastStep?.Output,
             model = options?.Model,
+            threshold = options?.Threshold,
+            reference_output = options?.ReferenceOutput,
+            samples = options?.Samples,
         };
         return await _client.JudgeAsync(payload);
     }

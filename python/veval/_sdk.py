@@ -58,6 +58,9 @@ class VevalSdk:
         criteria: str,
         ctx: VevalExecutionContext,
         model: Optional[str] = None,
+        threshold: Optional[float] = None,
+        reference_output: Optional[Any] = None,
+        samples: Optional[int] = None,
     ) -> dict:
         last_step = ctx.steps[-1] if ctx.steps else None
         payload = {
@@ -65,6 +68,9 @@ class VevalSdk:
             "input": last_step.input if last_step else ctx.input,
             "output": last_step.output if last_step else None,
             "model": model,
+            "threshold": threshold,
+            "reference_output": reference_output,
+            "samples": samples,
         }
         return await self._client.judge_async(payload)
 

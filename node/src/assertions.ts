@@ -9,10 +9,25 @@ export interface JudgeResult {
   score: number;
   passed: boolean;
   reasoning: string;
+  threshold?: number;
+}
+
+export interface JudgeOptions {
+  /** Must be in the provider's current model catalog, or the judge call fails. */
+  model?: string;
+  /** Pass/fail cutoff on the 0.0-1.0 score. Defaults server-side to 0.7 if omitted. */
+  threshold?: number;
+  /** An example of an output that fully satisfies the rubric, included in the grading prompt. */
+  referenceOutput?: unknown;
+  /**
+   * Number of independent grading calls to average via median, for self-consistency.
+   * Clamped server-side to [1, 5]. Each sample is billed, so higher values cost proportionally more.
+   */
+  samples?: number;
 }
 
 export interface JudgeableSdk {
-  judgeAsync(criteria: string, ctx: VevalExecutionContext, model?: string): Promise<JudgeResult>;
+  judgeAsync(criteria: string, ctx: VevalExecutionContext, options?: JudgeOptions): Promise<JudgeResult>;
 }
 
 function flattenSteps(steps: readonly Step[]): Step[] {
@@ -94,13 +109,19 @@ export const TraceAssert = {
     };
   },
 
-  /** Scores the trace's output against a rubric using an LLM judge, evaluated server-side. */
-  judge(veval: JudgeableSdk, criteria: string, model?: string): ITraceAssertion {
+  /**
+   * Scores the trace's output against a rubric using an LLM judge, evaluated server-side.
+   * The third argument accepts either a model name string (legacy shorthand) or a full
+   * JudgeOptions object with threshold/referenceOutput/samples.
+   */
+  judge(veval: JudgeableSdk, criteria: string, modelOrOptions?: string | JudgeOptions): ITraceAssertion {
+    const options: JudgeOptions | undefined =
+      typeof modelOrOptions === "string" ? { model: modelOrOptions } : modelOrOptions;
     return {
       async evaluate(ctx) {
         let result: JudgeResult;
         try {
-          result = await veval.judgeAsync(criteria, ctx, model);
+          result = await veval.judgeAsync(criteria, ctx, options);
         } catch (err) {
           // Never let a network/API failure during judging silently pass a test.
           const message = err instanceof Error ? err.message : String(err);

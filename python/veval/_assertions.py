@@ -84,12 +84,22 @@ class TraceAssert:
         return _Assertion()
 
     @staticmethod
-    def judge(veval: Any, criteria: str, model: Optional[str] = None) -> ITraceAssertion:
+    def judge(
+        veval: Any,
+        criteria: str,
+        model: Optional[str] = None,
+        threshold: Optional[float] = None,
+        reference_output: Optional[Any] = None,
+        samples: Optional[int] = None,
+    ) -> ITraceAssertion:
         """Scores the trace's output against a rubric using an LLM judge, evaluated server-side."""
         class _Assertion(ITraceAssertion):
             async def evaluate_async(self, ctx: VevalExecutionContext) -> Optional[str]:
                 try:
-                    result = await veval.judge_async(criteria, ctx, model=model)
+                    result = await veval.judge_async(
+                        criteria, ctx, model=model, threshold=threshold,
+                        reference_output=reference_output, samples=samples,
+                    )
                 except Exception as ex:
                     # Never let a network/API failure during judging silently pass a test.
                     return f"Judge: evaluation failed — {ex}"

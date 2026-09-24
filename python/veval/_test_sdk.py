@@ -66,6 +66,9 @@ class VevalTestSdk(VevalSdk):
         criteria: str,
         ctx: VevalExecutionContext,
         model: Optional[str] = None,
+        threshold: Optional[float] = None,
+        reference_output: Optional[Any] = None,
+        samples: Optional[int] = None,
     ) -> dict:
         queue = self._judge_mocks.get(criteria)
         if queue:

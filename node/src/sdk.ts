@@ -11,7 +11,7 @@ import {
   ReplayOptions,
   ReplayResult,
 } from "./tracing";
-import { ITraceAssertion, JudgeResult } from "./assertions";
+import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 
@@ -58,13 +58,16 @@ export class VevalSdk {
     return this.http.getTraceAsync(traceId);
   }
 
-  async judgeAsync(criteria: string, ctx: VevalExecutionContext, model?: string): Promise<JudgeResult> {
+  async judgeAsync(criteria: string, ctx: VevalExecutionContext, options?: JudgeOptions): Promise<JudgeResult> {
     const lastStep = ctx.steps[ctx.steps.length - 1];
     const payload = {
       criteria,
       input: lastStep ? lastStep.input : ctx.input,
       output: lastStep ? lastStep.output : null,
-      model: model ?? null,
+      model: options?.model ?? null,
+      threshold: options?.threshold ?? null,
+      reference_output: options?.referenceOutput ?? null,
+      samples: options?.samples ?? null,
     };
     return this.http.judgeAsync(payload);
   }

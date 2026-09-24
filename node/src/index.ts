@@ -12,7 +12,7 @@ export {
   ReplayOptions,
   ReplayResult,
 } from "./tracing";
-export { ITraceAssertion, TraceAssert, JudgeResult, JudgeableSdk } from "./assertions";
+export { ITraceAssertion, TraceAssert, JudgeResult, JudgeableSdk, JudgeOptions } from "./assertions";
 export { ScenarioItem, ItemRunResult, ScenarioRunResult } from "./scenarios";
 export { VevalHttpClient } from "./http-client";
 export { VevalSdk } from "./sdk";
