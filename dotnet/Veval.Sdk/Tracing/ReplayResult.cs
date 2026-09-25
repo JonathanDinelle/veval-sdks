@@ -10,4 +10,7 @@ public class ReplayResult
     public DateTime CompletedAt { get; set; }
     public string Status { get; set; } = "success";
     public string? Error { get; set; }
+
+    /// <summary>How the replay differed from its recording; set when <see cref="ReplayOptions.CompareWithRecording"/> is on.</summary>
+    public SnapshotDiff? RecordingDiff { get; set; }
 }

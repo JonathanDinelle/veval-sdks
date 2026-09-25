@@ -2,6 +2,7 @@ import { VevalOptions } from "./options";
 import { VevalSdk } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
+import { SnapshotData } from "./snapshots";
 import { ITraceAssertion, JudgeResult } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 
@@ -10,6 +11,7 @@ export class VevalTestSdk extends VevalSdk {
   private _lastStatus: string | null = null;
   private _lastError: string | null = null;
   private _judgeMocks: Map<string, JudgeResult[]> = new Map();
+  private _snapshots: Map<string, SnapshotData> = new Map();
 
   constructor(options: VevalOptions) {
     super(options);
@@ -97,6 +99,19 @@ export class VevalTestSdk extends VevalSdk {
     );
     await this.http.sendTraceAsync(payload);
     return output as T;
+  }
+
+  /**
+   * Registers a baseline locally, so getSnapshotAsync / TraceAssert.matchesSnapshot work offline in CI.
+   * Names without a local baseline are loaded from the server.
+   */
+  withSnapshot(snapshotName: string, snapshot: SnapshotData): this {
+    this._snapshots.set(snapshotName, snapshot);
+    return this;
+  }
+
+  override async getSnapshotAsync(snapshotName: string): Promise<SnapshotData | null> {
+    return this._snapshots.get(snapshotName) ?? super.getSnapshotAsync(snapshotName);
   }
 
   override async getTraceAsync(traceId: string): Promise<TraceData | null> {

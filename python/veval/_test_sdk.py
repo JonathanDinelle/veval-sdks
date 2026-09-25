@@ -31,6 +31,7 @@ class VevalTestSdk(VevalSdk):
         self._last_status: Optional[str] = None
         self._last_error: Optional[str] = None
         self._judge_mocks: dict[str, deque] = {}
+        self._snapshots: dict[str, SnapshotData] = {}
 
     @property
     def last_status(self) -> Optional[str]:
@@ -127,6 +128,19 @@ class VevalTestSdk(VevalSdk):
     async def load_snapshot_async(self, trace_id: str) -> Optional[SnapshotData]:
         trace = await self.get_trace_async(trace_id)
         return SnapshotData.from_trace(trace) if trace else None
+
+    def with_snapshot(self, snapshot_name: str, snapshot: SnapshotData) -> VevalTestSdk:
+        """
+        Registers a baseline locally, so get_snapshot_async / TraceAssert.matches_snapshot work offline
+        in CI. Names without a local baseline are loaded from the server.
+        """
+        self._snapshots[snapshot_name] = snapshot
+        return self
+
+    async def get_snapshot_async(self, snapshot_name: str) -> Optional[SnapshotData]:
+        if snapshot_name in self._snapshots:
+            return self._snapshots[snapshot_name]
+        return await super().get_snapshot_async(snapshot_name)
 
     async def run_scenario_async(
         self,

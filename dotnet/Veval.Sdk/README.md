@@ -234,27 +234,29 @@ public class NoHallucinationAssertion : ITraceAssertion
 
 ## Snapshot Testing
 
-Capture a baseline of your agent's step structure, then detect when it drifts.
+Store a known-good run — every step with its input and output — then detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered.
 
 ```csharp
-// After a run, capture the snapshot from the context
-var snapshot = SnapshotData.FromContext(ctx);
-// snapshot.StepNames  — distinct step names
-// snapshot.StepOrder  — ordered list (including repeats)
-// snapshot.StepCount  — total count
+// Save a baseline from a recorded trace. The trace is pinned, so retention never deletes it.
+await veval.SaveSnapshotAsync("my-agent-baseline", "tr_abc123");
 
-// Later, compare against a new run
-var diff = SnapshotComparer.Compare(snapshot, newCtx);
-
-if (diff.HasChanges)
+// In tests: an assertion like any other. A missing baseline fails; it never passes silently.
+var result = await testSdk.ReplayAsync(trace, agent.ExecuteAsync, new ReplayOptions
 {
-    Console.WriteLine("Added steps: " + string.Join(", ", diff.AddedSteps));
-    Console.WriteLine("Removed steps: " + string.Join(", ", diff.RemovedSteps));
-    Console.WriteLine("Order changes: " + string.Join(", ", diff.OrderChanges));
-}
+    MockLlmResponses = true,
+    Assertions = [TraceAssert.MatchesSnapshot(testSdk, "my-agent-baseline")],
+    // Also fail if the replay's steps or inputs drift from the trace being replayed.
+    CompareWithRecording = new SnapshotOptions(),
+});
+
+// Or compare directly, and record the result in the dashboard.
+var baseline = await veval.GetSnapshotAsync("my-agent-baseline");
+var diff = await veval.CompareSnapshotAsync("my-agent-baseline", baseline!, ctx);
+if (diff.HasChanges)
+    Console.WriteLine(diff.Summary());   // every change, with a line diff of changed inputs
 ```
 
-Snapshots can be stored via the Veval API (`POST /api/snapshots`, `GET /api/snapshots/{id}`) for persistent baseline management.
+`SnapshotOptions` controls what's compared: `CompareInputs` (default on), `CompareOutputs` (default off), `IgnoreSteps`, `IgnoreFields` (e.g. `timestamp`), and `Normalize`. For offline CI, register a baseline with `testSdk.WithSnapshot(name, snapshot)`.
 
 ## Full Example
 

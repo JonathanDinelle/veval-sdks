@@ -1,6 +1,7 @@
 from __future__ import annotations
 from typing import Any, Optional, TYPE_CHECKING
 from ._step import Step
+from ._snapshots import SnapshotOptions, compare_snapshots
 
 if TYPE_CHECKING:
     from ._context import VevalExecutionContext
@@ -109,4 +110,32 @@ class TraceAssert:
                 if result["passed"]:
                     return None
                 return f"Judge: {criteria} (score {result['score']:.2f}) — {result['reasoning']}"
+        return _Assertion()
+
+    @staticmethod
+    def matches_snapshot(
+        snapshot_or_sdk: Any,
+        snapshot_name: Optional[str] = None,
+        options: Optional[SnapshotOptions] = None,
+    ) -> ITraceAssertion:
+        """
+        Fails when the run's step sequence or step inputs differ from the snapshot — e.g. a changed
+        prompt, a dropped or repeated call. Pass a SnapshotData, or (sdk, name) to load a stored
+        baseline; a missing baseline fails the assertion.
+        """
+        by_name = snapshot_name is not None
+
+        class _Assertion(ITraceAssertion):
+            async def evaluate_async(self, ctx: VevalExecutionContext) -> Optional[str]:
+                name = snapshot_name if by_name else snapshot_or_sdk.name
+                try:
+                    snapshot = await snapshot_or_sdk.get_snapshot_async(snapshot_name) if by_name else snapshot_or_sdk
+                except Exception as ex:
+                    # A baseline we couldn't load must fail loudly, never pass vacuously.
+                    return f"MatchesSnapshot: could not load snapshot '{name}' — {ex}"
+                if snapshot is None:
+                    return f"MatchesSnapshot: no snapshot named '{name}'. Save one with save_snapshot_async first."
+
+                diff = compare_snapshots(snapshot, ctx, options)
+                return "MatchesSnapshot: " + diff.summary(name or snapshot.name) if diff.has_changes else None
         return _Assertion()

@@ -16,6 +16,20 @@ public static class TraceAssert
     public static ITraceAssertion Judge(IVevalSdk veval, string criteria, JudgeOptions? options = null) =>
         new JudgeAssertion(veval, criteria, options);
 
+    /// <summary>
+    /// Fails when the run's step sequence or step inputs differ from the snapshot — e.g. a changed prompt,
+    /// a dropped or repeated call. The failure message lists every change with a diff.
+    /// </summary>
+    public static ITraceAssertion MatchesSnapshot(SnapshotData snapshot, SnapshotOptions? options = null) =>
+        new SnapshotAssertion(_ => Task.FromResult<SnapshotData?>(snapshot), snapshot.Name, options);
+
+    /// <summary>
+    /// Like <see cref="MatchesSnapshot(SnapshotData, SnapshotOptions?)"/>, loading the named baseline stored in Veval
+    /// (see <see cref="IVevalSdk.SaveSnapshotAsync(string, string)"/>). A missing baseline fails the assertion.
+    /// </summary>
+    public static ITraceAssertion MatchesSnapshot(IVevalSdk veval, string snapshotName, SnapshotOptions? options = null) =>
+        new SnapshotAssertion(_ => veval.GetSnapshotAsync(snapshotName), snapshotName, options);
+
     private class MaxStepsAssertion : ITraceAssertion
     {
         private readonly int _max;
@@ -209,6 +223,40 @@ public static class TraceAssert
             return result.Passed
                 ? null
                 : $"Judge: {_criteria} (score {result.Score:0.00}) — {result.Reasoning}";
+        }
+    }
+
+    private class SnapshotAssertion : ITraceAssertion
+    {
+        private readonly Func<VevalExecutionContext, Task<SnapshotData?>> _load;
+        private readonly string? _name;
+        private readonly SnapshotOptions? _options;
+
+        public SnapshotAssertion(Func<VevalExecutionContext, Task<SnapshotData?>> load, string? name, SnapshotOptions? options)
+        {
+            _load = load;
+            _name = name;
+            _options = options;
+        }
+
+        public async Task<string?> EvaluateAsync(VevalExecutionContext ctx)
+        {
+            SnapshotData? snapshot;
+            try
+            {
+                snapshot = await _load(ctx);
+            }
+            catch (Exception ex)
+            {
+                // A baseline we couldn't load must fail loudly, never pass vacuously.
+                return $"MatchesSnapshot: could not load snapshot '{_name}' — {ex.Message}";
+            }
+
+            if (snapshot is null)
+                return $"MatchesSnapshot: no snapshot named '{_name}'. Save one with SaveSnapshotAsync first.";
+
+            var diff = SnapshotComparer.Compare(snapshot, ctx, _options);
+            return diff.HasChanges ? "MatchesSnapshot: " + diff.Summary(_name ?? snapshot.Name) : null;
         }
     }
 }

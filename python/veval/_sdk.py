@@ -1,18 +1,19 @@
 from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable, Optional, TypeVar
+from typing import Any, Callable, Awaitable, Optional, TypeVar, Union
 
 from ._options import VevalOptions
 from ._context import VevalExecutionContext
 from ._step import Step
 from ._tracing import (
-    TraceData, SnapshotData, SnapshotDiff, compare_snapshots,
+    TraceData, SnapshotData, SnapshotDiff, SnapshotOptions, compare_snapshots,
     ReplayOptions, ReplayResult,
 )
 from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
+from ._snapshots import save_from_context_payload, save_from_trace_payload, snapshot_run_payload
 
 T = TypeVar("T")
 
@@ -78,31 +79,36 @@ class VevalSdk:
         trace = await self._client.get_trace_async(trace_id)
         return SnapshotData.from_trace(trace) if trace else None
 
+    async def save_snapshot_async(
+        self,
+        snapshot_name: str,
+        source: Union[str, VevalExecutionContext],
+    ) -> SnapshotData:
+        """
+        Stores a named baseline — from a recorded trace ID (the trace is pinned so retention never
+        deletes it), or from a run you just executed. Saving again under the same name replaces it.
+        """
+        payload = (
+            save_from_trace_payload(snapshot_name, source)
+            if isinstance(source, str)
+            else save_from_context_payload(snapshot_name, source)
+        )
+        return await self._client.create_snapshot_async(payload)
+
+    async def get_snapshot_async(self, snapshot_name: str) -> Optional[SnapshotData]:
+        """The latest stored baseline with this name, or None if none exists."""
+        return await self._client.get_snapshot_async(snapshot_name)
+
     async def compare_snapshot_async(
         self,
         snapshot_name: str,
         snapshot: SnapshotData,
         ctx: VevalExecutionContext,
+        options: Optional[SnapshotOptions] = None,
     ) -> SnapshotDiff:
-        diff = compare_snapshots(snapshot, ctx)
-        actual = SnapshotData.from_context(ctx)
-        await self._client.post_scenario_run_async(snapshot_name, {
-            "passed": not diff.has_changes,
-            "pass_count": 0 if diff.has_changes else 1,
-            "fail_count": 1 if diff.has_changes else 0,
-            "results": [{
-                "name": snapshot_name,
-                "passed": not diff.has_changes,
-                "type": "snapshot",
-                "expected": [{"name": s.name, "output": s.output} for s in snapshot.steps],
-                "actual": [{"name": s.name, "output": s.output} for s in actual.steps],
-                "failures": (
-                    [f"added: {s}" for s in diff.added_steps]
-                    + [f"removed: {s}" for s in diff.removed_steps]
-                    + diff.order_changes
-                ),
-            }],
-        })
+        """Compares a run against a baseline and records the result in the dashboard."""
+        diff = compare_snapshots(snapshot, ctx, options)
+        await self._client.post_scenario_run_async(snapshot_name, snapshot_run_payload(snapshot_name, diff))
         return diff
 
     async def replay_async(
@@ -136,9 +142,18 @@ class VevalSdk:
             if failure:
                 failures.append(failure)
 
+        recording_diff = None
+        if options.compare_with_recording is not None:
+            recording_diff = compare_snapshots(SnapshotData.from_trace(trace), ctx, options.compare_with_recording)
+            if recording_diff.has_changes:
+                failures.append(
+                    "Replay drifted from its recording — " + recording_diff.summary(f"recording {trace.trace_id}")
+                )
+
         return ReplayResult(
             failures=failures,
             replayed_context=ctx,
+            recording_diff=recording_diff,
             output=output,
             started_at=started_at,
             completed_at=completed_at,

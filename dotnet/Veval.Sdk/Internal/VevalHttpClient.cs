@@ -96,5 +96,39 @@ internal class VevalHttpClient : IDisposable
             ?? throw new InvalidOperationException("Judge response could not be parsed.");
     }
 
+    /// <summary>
+    /// Saves a named snapshot baseline. Throws on failure — a baseline that silently didn't save would make
+    /// every later comparison fail (or worse, compare against a stale one).
+    /// </summary>
+    internal async Task<SnapshotData> CreateSnapshotAsync(object payload)
+    {
+        var json = JsonSerializer.Serialize(payload);
+        var content = new StringContent(json, Encoding.UTF8, "application/json");
+        var response = await _http.PostAsync($"{_endpoint}/v1/snapshots", content);
+
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                $"Saving snapshot failed with status {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+
+        return JsonSerializer.Deserialize<SnapshotData>(await response.Content.ReadAsStringAsync())
+            ?? throw new InvalidOperationException("Snapshot response could not be parsed.");
+    }
+
+    /// <summary>
+    /// Loads the latest baseline with this name. Returns null only when none exists (404); any other
+    /// failure throws, so a network error can never look like "nothing to compare against".
+    /// </summary>
+    internal async Task<SnapshotData?> GetSnapshotAsync(string name)
+    {
+        var response = await _http.GetAsync($"{_endpoint}/v1/snapshots/{Uri.EscapeDataString(name)}");
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                $"Loading snapshot '{name}' failed with status {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+
+        return JsonSerializer.Deserialize<SnapshotData>(await response.Content.ReadAsStringAsync());
+    }
+
     public void Dispose() => _http.Dispose();
 }

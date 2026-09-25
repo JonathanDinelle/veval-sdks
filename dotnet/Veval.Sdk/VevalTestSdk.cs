@@ -16,6 +16,7 @@ public class VevalTestSdk : IVevalSdk
 {
     private readonly VevalHttpClient _reportingClient;
     private readonly Dictionary<string, Queue<JudgeResult>> _judgeMocks = new();
+    private readonly Dictionary<string, SnapshotData> _snapshots = new();
     private TraceData? _replayTrace;
     private string _lastStatus = "success";
     private string? _lastError;
@@ -111,30 +112,31 @@ public class VevalTestSdk : IVevalSdk
         return Task.FromResult(trace == null ? null : SnapshotData.FromTrace(trace));
     }
 
-    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx)
+    /// <summary>
+    /// Registers a baseline locally, so GetSnapshotAsync / TraceAssert.MatchesSnapshot work offline in CI.
+    /// Names without a local baseline are loaded from the server.
+    /// </summary>
+    public VevalTestSdk WithSnapshot(string snapshotName, SnapshotData snapshot)
     {
-        var diff   = SnapshotComparer.Compare(snapshot, ctx);
-        var actual = SnapshotData.FromContext(ctx);
-        await _reportingClient.PostScenarioRunAsync(snapshotName, new
-        {
-            passed     = !diff.HasChanges,
-            pass_count = diff.HasChanges ? 0 : 1,
-            fail_count = diff.HasChanges ? 1 : 0,
-            results    = new[]
-            {
-                new
-                {
-                    name     = snapshotName,
-                    passed   = !diff.HasChanges,
-                    type     = "snapshot",
-                    expected = snapshot.Steps.Select(s => new { s.Name, s.Output }),
-                    actual   = actual.Steps.Select(s => new { s.Name, s.Output }),
-                    failures = diff.AddedSteps.Select(s => $"added: {s}")
-                        .Concat(diff.RemovedSteps.Select(s => $"removed: {s}"))
-                        .Concat(diff.OrderChanges),
-                }
-            },
-        });
+        _snapshots[snapshotName] = snapshot;
+        return this;
+    }
+
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId) =>
+        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromTrace(snapshotName, traceId));
+
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx) =>
+        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromContext(snapshotName, ctx));
+
+    public Task<SnapshotData?> GetSnapshotAsync(string snapshotName) =>
+        _snapshots.TryGetValue(snapshotName, out var local)
+            ? Task.FromResult<SnapshotData?>(local)
+            : _reportingClient.GetSnapshotAsync(snapshotName);
+
+    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx, SnapshotOptions? options = null)
+    {
+        var diff = SnapshotComparer.Compare(snapshot, ctx, options);
+        await _reportingClient.PostScenarioRunAsync(snapshotName, SnapshotPayloads.Run(snapshotName, diff));
         return diff;
     }
 
@@ -160,6 +162,7 @@ public class VevalTestSdk : IVevalSdk
             var f = await a.EvaluateAsync(ctx);
             if (f != null) failures.Add(f);
         }
+        var recordingDiff = ReplayRecordingCheck.Evaluate(trace, ctx, options, failures);
 
         return new ReplayResult
         {
@@ -170,6 +173,7 @@ public class VevalTestSdk : IVevalSdk
             CompletedAt = DateTime.UtcNow,
             Status = status,
             Error = error,
+            RecordingDiff = recordingDiff,
         };
     }
 

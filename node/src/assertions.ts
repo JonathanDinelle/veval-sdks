@@ -1,5 +1,6 @@
 import { Step } from "./step";
 import { VevalExecutionContext } from "./context";
+import { SnapshotComparer, SnapshotData, SnapshotOptions } from "./snapshots";
 
 export interface ITraceAssertion {
   evaluate(ctx: VevalExecutionContext): Promise<string | null>;
@@ -28,6 +29,11 @@ export interface JudgeOptions {
 
 export interface JudgeableSdk {
   judgeAsync(criteria: string, ctx: VevalExecutionContext, options?: JudgeOptions): Promise<JudgeResult>;
+}
+
+/** Anything that can load a stored snapshot baseline by name (VevalSdk, VevalTestSdk). */
+export interface SnapshotSource {
+  getSnapshotAsync(snapshotName: string): Promise<SnapshotData | null>;
 }
 
 function flattenSteps(steps: readonly Step[]): Step[] {
@@ -132,6 +138,39 @@ export const TraceAssert = {
 
         if (result.passed) return null;
         return `Judge: ${criteria} (score ${result.score.toFixed(2)}) — ${result.reasoning}`;
+      },
+    };
+  },
+
+  /**
+   * Fails when the run's step sequence or step inputs differ from the snapshot — e.g. a changed prompt,
+   * a dropped or repeated call. Pass a SnapshotData, or (sdk, name) to load a stored baseline; a missing
+   * baseline fails the assertion.
+   */
+  matchesSnapshot(
+    snapshotOrSource: SnapshotData | SnapshotSource,
+    nameOrOptions?: string | SnapshotOptions,
+    options?: SnapshotOptions
+  ): ITraceAssertion {
+    const byName = typeof nameOrOptions === "string";
+    const name = byName ? (nameOrOptions as string) : (snapshotOrSource as SnapshotData).name;
+    const opts = byName ? options : (nameOrOptions as SnapshotOptions | undefined);
+    return {
+      async evaluate(ctx) {
+        let snapshot: SnapshotData | null;
+        try {
+          snapshot = byName
+            ? await (snapshotOrSource as SnapshotSource).getSnapshotAsync(name!)
+            : (snapshotOrSource as SnapshotData);
+        } catch (err) {
+          // A baseline we couldn't load must fail loudly, never pass vacuously.
+          const message = err instanceof Error ? err.message : String(err);
+          return `MatchesSnapshot: could not load snapshot '${name}' — ${message}`;
+        }
+        if (!snapshot) return `MatchesSnapshot: no snapshot named '${name}'. Save one with saveSnapshotAsync first.`;
+
+        const diff = SnapshotComparer.compare(snapshot, ctx, opts);
+        return diff.has_changes ? "MatchesSnapshot: " + diff.summary(name ?? snapshot.name) : null;
       },
     };
   },

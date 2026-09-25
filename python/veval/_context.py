@@ -59,9 +59,12 @@ class VevalExecutionContext:
         if self._mock_outputs is not None:
             q = self._mock_outputs.get(name)
             if q:
-                mock = q.popleft()
+                recorded = q.popleft()
+                mock = recorded.output
                 s = Step(name)
                 s.input = input
+                # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
+                s.type = recorded.type or "custom"
                 s.metadata["_source"] = "replay"
                 s.complete(mock)
                 self._steps.append(s)
@@ -98,4 +101,4 @@ class VevalExecutionContext:
         for step in trace.steps:
             if step.name not in self._mock_outputs:
                 self._mock_outputs[step.name] = deque()
-            self._mock_outputs[step.name].append(step.output)
+            self._mock_outputs[step.name].append(step)

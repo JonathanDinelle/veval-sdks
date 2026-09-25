@@ -1,5 +1,6 @@
 import { TraceData } from "./tracing";
 import { JudgeResult } from "./assertions";
+import type { SnapshotData } from "./snapshots";
 
 export class VevalHttpClient {
   private readonly endpoint: string;
@@ -68,6 +69,37 @@ export class VevalHttpClient {
     } catch {
       // swallow silently
     }
+  }
+
+  /**
+   * Saves a named snapshot baseline. Throws on failure — a baseline that silently didn't save would
+   * make every later comparison fail, or compare against a stale one.
+   */
+  async createSnapshotAsync(payload: unknown): Promise<SnapshotData> {
+    const res = await fetch(`${this.endpoint}/v1/snapshots`, {
+      method: "POST",
+      headers: this.headers,
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      throw new Error(`Saving snapshot failed with status ${res.status}: ${await res.text()}`);
+    }
+    return (await res.json()) as SnapshotData;
+  }
+
+  /**
+   * Loads the latest baseline with this name. Returns null only when none exists (404); any other
+   * failure throws, so a network error can never look like "nothing to compare against".
+   */
+  async getSnapshotAsync(name: string): Promise<SnapshotData | null> {
+    const res = await fetch(`${this.endpoint}/v1/snapshots/${encodeURIComponent(name)}`, {
+      headers: this.headers,
+    });
+    if (res.status === 404) return null;
+    if (!res.ok) {
+      throw new Error(`Loading snapshot '${name}' failed with status ${res.status}: ${await res.text()}`);
+    }
+    return (await res.json()) as SnapshotData;
   }
 
   // Unlike the other calls on this client, judgeAsync deliberately does not swallow

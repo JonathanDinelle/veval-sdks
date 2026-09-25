@@ -4,12 +4,17 @@ from ._context import VevalExecutionContext
 from ._tracing import (
     TraceData,
     StepData,
-    SnapshotStep,
-    SnapshotData,
-    SnapshotDiff,
-    compare_snapshots,
     ReplayOptions,
     ReplayResult,
+)
+from ._snapshots import (
+    SnapshotStep,
+    SnapshotData,
+    SnapshotOptions,
+    SnapshotChange,
+    SnapshotAlignmentRow,
+    SnapshotDiff,
+    compare_snapshots,
 )
 from ._assertions import ITraceAssertion, TraceAssert
 from ._scenarios import ScenarioItem, ItemRunResult, ScenarioRunResult
@@ -25,6 +30,9 @@ __all__ = [
     "StepData",
     "SnapshotStep",
     "SnapshotData",
+    "SnapshotOptions",
+    "SnapshotChange",
+    "SnapshotAlignmentRow",
     "SnapshotDiff",
     "compare_snapshots",
     "ReplayOptions",

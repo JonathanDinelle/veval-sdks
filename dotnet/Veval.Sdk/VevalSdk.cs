@@ -66,30 +66,18 @@ public class VevalSdk : IVevalSdk
         return await _client.JudgeAsync(payload);
     }
 
-    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx)
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId) =>
+        _client.CreateSnapshotAsync(SnapshotPayloads.SaveFromTrace(snapshotName, traceId));
+
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx) =>
+        _client.CreateSnapshotAsync(SnapshotPayloads.SaveFromContext(snapshotName, ctx));
+
+    public Task<SnapshotData?> GetSnapshotAsync(string snapshotName) => _client.GetSnapshotAsync(snapshotName);
+
+    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx, SnapshotOptions? options = null)
     {
-        var diff    = SnapshotComparer.Compare(snapshot, ctx);
-        var actual  = SnapshotData.FromContext(ctx);
-        await _client.PostScenarioRunAsync(snapshotName, new
-        {
-            passed     = !diff.HasChanges,
-            pass_count = diff.HasChanges ? 0 : 1,
-            fail_count = diff.HasChanges ? 1 : 0,
-            results    = new[]
-            {
-                new
-                {
-                    name     = snapshotName,
-                    passed   = !diff.HasChanges,
-                    type     = "snapshot",
-                    expected = snapshot.Steps.Select(s => new { s.Name, s.Output }),
-                    actual   = actual.Steps.Select(s => new { s.Name, s.Output }),
-                    failures = diff.AddedSteps.Select(s => $"added: {s}")
-                        .Concat(diff.RemovedSteps.Select(s => $"removed: {s}"))
-                        .Concat(diff.OrderChanges),
-                }
-            },
-        });
+        var diff = SnapshotComparer.Compare(snapshot, ctx, options);
+        await _client.PostScenarioRunAsync(snapshotName, SnapshotPayloads.Run(snapshotName, diff));
         return diff;
     }
 
@@ -125,6 +113,7 @@ public class VevalSdk : IVevalSdk
             if (failure != null)
                 failures.Add(failure);
         }
+        var recordingDiff = ReplayRecordingCheck.Evaluate(trace, ctx, options, failures);
 
         return new ReplayResult
         {
@@ -135,6 +124,7 @@ public class VevalSdk : IVevalSdk
             CompletedAt = completedAt,
             Status = status,
             Error = error,
+            RecordingDiff = recordingDiff,
         };
     }
 
