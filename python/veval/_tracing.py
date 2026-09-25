@@ -5,7 +5,7 @@ from typing import Any, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ._context import VevalExecutionContext
-    from ._step import Step
+
 
 
 @dataclass
@@ -84,82 +84,24 @@ class TraceData:
         )
 
 
-@dataclass
-class SnapshotStep:
-    name: str = ""
-    output: Any = None
-
-
-@dataclass
-class SnapshotData:
-    id: Optional[str] = None
-    step_names: list[str] = field(default_factory=list)
-    step_order: list[str] = field(default_factory=list)
-    step_count: int = 0
-    steps: list[SnapshotStep] = field(default_factory=list)
-
-    @staticmethod
-    def from_context(ctx: VevalExecutionContext) -> SnapshotData:
-        steps: list[SnapshotStep] = []
-        _collect_steps(ctx.steps, steps)
-        return SnapshotData(
-            step_names=list(dict.fromkeys(s.name for s in steps)),
-            step_order=[s.name for s in steps],
-            step_count=len(steps),
-            steps=steps,
-        )
-
-    @staticmethod
-    def from_trace(trace: TraceData) -> SnapshotData:
-        steps = [SnapshotStep(name=s.name, output=s.output) for s in trace.steps]
-        return SnapshotData(
-            step_names=list(dict.fromkeys(s.name for s in steps)),
-            step_order=[s.name for s in steps],
-            step_count=len(steps),
-            steps=steps,
-        )
-
-
-def _collect_steps(steps: list[Step], result: list[SnapshotStep]) -> None:
-    for s in steps:
-        result.append(SnapshotStep(name=s.name, output=s.output))
-        _collect_steps(s.children, result)
-
-
-@dataclass
-class SnapshotDiff:
-    added_steps: list[str] = field(default_factory=list)
-    removed_steps: list[str] = field(default_factory=list)
-    order_changes: list[str] = field(default_factory=list)
-
-    @property
-    def has_changes(self) -> bool:
-        return bool(self.added_steps or self.removed_steps or self.order_changes)
-
-
-def compare_snapshots(snapshot: SnapshotData, ctx: VevalExecutionContext) -> SnapshotDiff:
-    current = SnapshotData.from_context(ctx)
-    diff = SnapshotDiff()
-
-    snapshot_set = set(snapshot.step_names)
-    current_set = set(current.step_names)
-    diff.added_steps = list(current_set - snapshot_set)
-    diff.removed_steps = list(snapshot_set - current_set)
-
-    min_len = min(len(snapshot.step_order), len(current.step_order))
-    for i in range(min_len):
-        if snapshot.step_order[i] != current.step_order[i]:
-            diff.order_changes.append(
-                f"Position {i}: expected '{snapshot.step_order[i]}', got '{current.step_order[i]}'"
-            )
-
-    return diff
+# Snapshot types live in _snapshots; re-exported here for existing imports.
+from ._snapshots import (  # noqa: E402
+    SnapshotStep,
+    SnapshotData,
+    SnapshotDiff,
+    SnapshotOptions,
+    compare_snapshots,
+)
 
 
 @dataclass
 class ReplayOptions:
     mock_llm_responses: bool = False
     assertions: list[Any] = field(default_factory=list)
+    # When set, the replay also fails if its step sequence or step inputs drifted from the recorded
+    # trace. Recorded outputs are served by step name, so a control-flow change can bind an output to
+    # the wrong call and still pass every assertion — this check catches that.
+    compare_with_recording: Optional[SnapshotOptions] = None
 
 
 @dataclass
@@ -171,6 +113,8 @@ class ReplayResult:
     completed_at: Optional[datetime] = None
     status: str = "success"
     error: Optional[str] = None
+    # How the replay differed from its recording; set when compare_with_recording is on.
+    recording_diff: Optional[SnapshotDiff] = None
 
     @property
     def passed(self) -> bool:

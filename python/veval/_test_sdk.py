@@ -1,5 +1,6 @@
 from __future__ import annotations
 import uuid
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Callable, Awaitable, Optional, TypeVar
 
@@ -29,6 +30,8 @@ class VevalTestSdk(VevalSdk):
         self._replay_trace: Optional[TraceData] = None
         self._last_status: Optional[str] = None
         self._last_error: Optional[str] = None
+        self._judge_mocks: dict[str, deque] = {}
+        self._snapshots: dict[str, SnapshotData] = {}
 
     @property
     def last_status(self) -> Optional[str]:
@@ -41,6 +44,41 @@ class VevalTestSdk(VevalSdk):
     def with_replay(self, trace: TraceData) -> VevalTestSdk:
         self._replay_trace = trace
         return self
+
+    def with_judge_mock(
+        self,
+        criteria: str,
+        passed: bool,
+        score: float = 1.0,
+        reasoning: str = "",
+    ) -> VevalTestSdk:
+        """
+        Registers a canned judge result for the given criteria string, so scenarios/replays
+        using TraceAssert.judge stay deterministic and free in CI. Without a matching mock,
+        judge_async raises rather than silently making a real, billed LLM call.
+        """
+        self._judge_mocks.setdefault(criteria, deque()).append(
+            {"score": score, "passed": passed, "reasoning": reasoning}
+        )
+        return self
+
+    async def judge_async(
+        self,
+        criteria: str,
+        ctx: VevalExecutionContext,
+        model: Optional[str] = None,
+        threshold: Optional[float] = None,
+        reference_output: Optional[Any] = None,
+        samples: Optional[int] = None,
+    ) -> dict:
+        queue = self._judge_mocks.get(criteria)
+        if queue:
+            return queue.popleft()
+        raise RuntimeError(
+            f"Replay mode: no judge mock for criteria '{criteria}'. "
+            "Call with_judge_mock(...) before running a scenario/replay that uses "
+            "TraceAssert.judge — this would have made a real, billed LLM call."
+        )
 
     async def run_async(
         self,
@@ -91,6 +129,19 @@ class VevalTestSdk(VevalSdk):
         trace = await self.get_trace_async(trace_id)
         return SnapshotData.from_trace(trace) if trace else None
 
+    def with_snapshot(self, snapshot_name: str, snapshot: SnapshotData) -> VevalTestSdk:
+        """
+        Registers a baseline locally, so get_snapshot_async / TraceAssert.matches_snapshot work offline
+        in CI. Names without a local baseline are loaded from the server.
+        """
+        self._snapshots[snapshot_name] = snapshot
+        return self
+
+    async def get_snapshot_async(self, snapshot_name: str) -> Optional[SnapshotData]:
+        if snapshot_name in self._snapshots:
+            return self._snapshots[snapshot_name]
+        return await super().get_snapshot_async(snapshot_name)
+
     async def run_scenario_async(
         self,
         scenario_name: str,
@@ -138,7 +189,7 @@ class VevalTestSdk(VevalSdk):
                     item_result.failures.append(f"Agent threw exception: {ex}")
 
                 for assertion in effective_assertions:
-                    failure = assertion.evaluate(ctx)
+                    failure = await assertion.evaluate_async(ctx)
                     if failure:
                         item_result.failures.append(failure)
                 item_result.context = ctx
@@ -156,6 +207,7 @@ class VevalTestSdk(VevalSdk):
                     "name": r.item.name or r.item.trace_id or "item",
                     "passed": r.passed,
                     "failures": r.failures,
+                    "judgments": r.context.judgments if r.context else [],
                 }
                 for r in scenario_result.results
             ],

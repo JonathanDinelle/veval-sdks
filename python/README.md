@@ -110,16 +110,24 @@ replay = asyncio.run(sdk.replay_async(
 print("Passed" if replay.passed else replay.failures)
 ```
 
-Take a snapshot of the current step sequence and compare future runs against it:
+Store a known-good run — every step with its input and output — and detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered:
 
 ```python
-snapshot = asyncio.run(sdk.load_snapshot_async("tr_abc123"))
+# Save a baseline from a recorded trace. The trace is pinned, so retention never deletes it.
+asyncio.run(sdk.save_snapshot_async("my-baseline", "tr_abc123"))
 
-diff = asyncio.run(sdk.compare_snapshot_async("my-snapshot", snapshot, ctx))
+# In tests: an assertion like any other. A missing baseline fails; it never passes silently.
+replay = asyncio.run(sdk.replay_async(trace, my_agent, ReplayOptions(
+    mock_llm_responses=True,
+    assertions=[TraceAssert.matches_snapshot(sdk, "my-baseline")],
+    compare_with_recording=SnapshotOptions(),  # also fail if steps/inputs drift from the trace
+)))
+
+# Or compare directly, and record the result in the dashboard.
+baseline = asyncio.run(sdk.get_snapshot_async("my-baseline"))
+diff = asyncio.run(sdk.compare_snapshot_async("my-baseline", baseline, ctx))
 if diff.has_changes:
-    print("Added:", diff.added_steps)
-    print("Removed:", diff.removed_steps)
-    print("Order changes:", diff.order_changes)
+    print(diff.summary())  # every change, with a line diff of changed inputs
 ```
 
 ## Test SDK
@@ -139,8 +147,8 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `api_key` | `str` | `""` | Your Veval API key |
-| `project_id` | `str` | `""` | Optional project scoping |
+| `api_key` | `str` | `""` | Your Veval API key — it also determines the workspace |
+| `project_id` | `str` | `""` | Deprecated and ignored; will be removed |
 | `flush_interval_ms` | `int` | `5000` | Batch flush interval |
 | `flush_batch_size` | `int` | `50` | Max traces per flush |
 
@@ -150,8 +158,10 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 |---|---|
 | `run_async(name, callback, input)` | Run agent and send trace |
 | `get_trace_async(trace_id)` | Fetch a recorded trace |
-| `load_snapshot_async(trace_id)` | Load a snapshot from a trace |
-| `compare_snapshot_async(name, snapshot, ctx)` | Diff current run against snapshot |
+| `save_snapshot_async(name, trace_id_or_ctx)` | Store a named baseline (pins the trace) |
+| `get_snapshot_async(name)` | Load the latest stored baseline |
+| `load_snapshot_async(trace_id)` | Build a snapshot from a trace (not pinned) |
+| `compare_snapshot_async(name, snapshot, ctx, options)` | Diff a run against a baseline and record it |
 | `replay_async(trace, callback, options)` | Replay trace with mocked outputs |
 | `run_scenario_async(name, agent, assertions, items)` | Run a test scenario |
 

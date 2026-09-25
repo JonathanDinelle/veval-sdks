@@ -50,30 +50,34 @@ public class VevalSdk : IVevalSdk
         return trace == null ? null : SnapshotData.FromTrace(trace);
     }
 
-    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx)
+    public async Task<JudgeResult> JudgeAsync(string criteria, VevalExecutionContext ctx, JudgeOptions? options = null)
     {
-        var diff    = SnapshotComparer.Compare(snapshot, ctx);
-        var actual  = SnapshotData.FromContext(ctx);
-        await _client.PostScenarioRunAsync(snapshotName, new
+        var lastStep = ctx.Steps.LastOrDefault();
+        var payload = new
         {
-            passed     = !diff.HasChanges,
-            pass_count = diff.HasChanges ? 0 : 1,
-            fail_count = diff.HasChanges ? 1 : 0,
-            results    = new[]
-            {
-                new
-                {
-                    name     = snapshotName,
-                    passed   = !diff.HasChanges,
-                    type     = "snapshot",
-                    expected = snapshot.Steps.Select(s => new { s.Name, s.Output }),
-                    actual   = actual.Steps.Select(s => new { s.Name, s.Output }),
-                    failures = diff.AddedSteps.Select(s => $"added: {s}")
-                        .Concat(diff.RemovedSteps.Select(s => $"removed: {s}"))
-                        .Concat(diff.OrderChanges),
-                }
-            },
-        });
+            criteria,
+            input = lastStep?.Input ?? ctx.Input,
+            output = lastStep?.Output,
+            model = options?.Model,
+            threshold = options?.Threshold,
+            reference_output = options?.ReferenceOutput,
+            samples = options?.Samples,
+        };
+        return await _client.JudgeAsync(payload);
+    }
+
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId) =>
+        _client.CreateSnapshotAsync(SnapshotPayloads.SaveFromTrace(snapshotName, traceId));
+
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx) =>
+        _client.CreateSnapshotAsync(SnapshotPayloads.SaveFromContext(snapshotName, ctx));
+
+    public Task<SnapshotData?> GetSnapshotAsync(string snapshotName) => _client.GetSnapshotAsync(snapshotName);
+
+    public async Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx, SnapshotOptions? options = null)
+    {
+        var diff = SnapshotComparer.Compare(snapshot, ctx, options);
+        await _client.PostScenarioRunAsync(snapshotName, SnapshotPayloads.Run(snapshotName, diff));
         return diff;
     }
 
@@ -105,10 +109,11 @@ public class VevalSdk : IVevalSdk
         if (error != null) failures.Add($"Replay threw exception: {error}");
         foreach (var assertion in options.Assertions)
         {
-            var failure = assertion.Evaluate(ctx);
+            var failure = await assertion.EvaluateAsync(ctx);
             if (failure != null)
                 failures.Add(failure);
         }
+        var recordingDiff = ReplayRecordingCheck.Evaluate(trace, ctx, options, failures);
 
         return new ReplayResult
         {
@@ -119,6 +124,7 @@ public class VevalSdk : IVevalSdk
             CompletedAt = completedAt,
             Status = status,
             Error = error,
+            RecordingDiff = recordingDiff,
         };
     }
 
@@ -179,7 +185,7 @@ public class VevalSdk : IVevalSdk
                 var ctx = await RunAndCaptureContextAsync(scenarioName, agent, item.Input);
                 foreach (var assertion in effectiveAssertions)
                 {
-                    var failure = assertion.Evaluate(ctx);
+                    var failure = await assertion.EvaluateAsync(ctx);
                     if (failure != null) itemResult.Failures.Add(failure);
                 }
                 itemResult.Context = ctx;
@@ -203,6 +209,7 @@ public class VevalSdk : IVevalSdk
                 name = r.Item.Name ?? r.Item.TraceId ?? "synthetic",
                 passed = r.Passed,
                 failures = r.Failures,
+                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
             }),
         });
 

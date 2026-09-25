@@ -2,6 +2,8 @@ using System.Text.Json;
 
 namespace Veval.Sdk;
 
+public record JudgeRecord(string Criteria, double Score, bool Passed, string Reasoning);
+
 public class VevalExecutionContext
 {
     public string TraceId { get; }
@@ -9,11 +11,16 @@ public class VevalExecutionContext
 
     private readonly List<Step> _steps = new();
     private readonly Dictionary<string, object> _metadata = new();
-    private Dictionary<string, Queue<object?>>? _mockOutputs;
+    private readonly List<JudgeRecord> _judgments = new();
+    private Dictionary<string, Queue<StepData>>? _mockOutputs;
     private bool _strictMockMode;
 
-    internal IReadOnlyList<Step> Steps => _steps;
-    internal IReadOnlyDictionary<string, object> TraceMeta => _metadata;
+    /// <summary>Steps recorded so far, in order — readable by custom assertions.</summary>
+    public IReadOnlyList<Step> Steps => _steps;
+    /// <summary>Trace-level metadata set with <see cref="SetMetadata"/>.</summary>
+    public IReadOnlyDictionary<string, object> TraceMeta => _metadata;
+    /// <summary>Judge verdicts recorded by <c>TraceAssert.Judge</c> during this run.</summary>
+    public IReadOnlyList<JudgeRecord> Judgments => _judgments;
 
     public VevalExecutionContext(string traceId, object? input)
     {
@@ -34,7 +41,8 @@ public class VevalExecutionContext
 
         if (_mockOutputs != null && _mockOutputs.TryGetValue(name, out var queue) && queue.Count > 0)
         {
-            var mock = queue.Dequeue();
+            var recorded = queue.Dequeue();
+            var mock = recorded.Output;
             T result;
             if (mock is T typed) result = typed;
             else if (mock != null)
@@ -44,7 +52,8 @@ public class VevalExecutionContext
             }
             else result = default!;
 
-            var mocked = new Step(name, null) { Input = input };
+            // Keep the recorded type so ToolCalled and snapshot types behave the same as in the original run.
+            var mocked = new Step(name, null) { Input = input, Type = recorded.Type };
             mocked.Metadata["_source"] = "replay";
             mocked.Complete(result);
             _steps.Add(mocked);
@@ -69,9 +78,12 @@ public class VevalExecutionContext
 
     public void SetMetadata(string key, object value) => _metadata[key] = value;
 
+    internal void RecordJudgment(string criteria, double score, bool passed, string reasoning) =>
+        _judgments.Add(new JudgeRecord(criteria, score, passed, reasoning));
+
     internal void LoadMockOutputs(TraceData trace, bool strict = true)
     {
-        _mockOutputs = new Dictionary<string, Queue<object?>>();
+        _mockOutputs = new Dictionary<string, Queue<StepData>>();
         _strictMockMode = strict;
 
         if (trace.Steps.Count == 0)
@@ -82,8 +94,8 @@ public class VevalExecutionContext
         foreach (var step in trace.Steps)
         {
             if (!_mockOutputs.ContainsKey(step.Name))
-                _mockOutputs[step.Name] = new Queue<object?>();
-            _mockOutputs[step.Name].Enqueue(step.Output);
+                _mockOutputs[step.Name] = new Queue<StepData>();
+            _mockOutputs[step.Name].Enqueue(step);
         }
     }
 }

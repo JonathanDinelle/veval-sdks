@@ -16,6 +16,7 @@ class VevalExecutionContext:
         self.input = input
         self._steps: list[Step] = []
         self._metadata: dict[str, Any] = {}
+        self._judgments: list[dict] = []
         self._mock_outputs: Optional[dict[str, deque]] = None
         self._strict_mock_mode = False
 
@@ -26,6 +27,18 @@ class VevalExecutionContext:
     @property
     def trace_meta(self) -> dict[str, Any]:
         return self._metadata
+
+    @property
+    def judgments(self) -> list[dict]:
+        return self._judgments
+
+    def record_judgment(self, criteria: str, score: float, passed: bool, reasoning: str) -> None:
+        self._judgments.append({
+            "criteria": criteria,
+            "score": score,
+            "passed": passed,
+            "reasoning": reasoning,
+        })
 
     async def track_step_async(
         self,
@@ -46,9 +59,12 @@ class VevalExecutionContext:
         if self._mock_outputs is not None:
             q = self._mock_outputs.get(name)
             if q:
-                mock = q.popleft()
+                recorded = q.popleft()
+                mock = recorded.output
                 s = Step(name)
                 s.input = input
+                # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
+                s.type = recorded.type or "custom"
                 s.metadata["_source"] = "replay"
                 s.complete(mock)
                 self._steps.append(s)
@@ -85,4 +101,4 @@ class VevalExecutionContext:
         for step in trace.steps:
             if step.name not in self._mock_outputs:
                 self._mock_outputs[step.name] = deque()
-            self._mock_outputs[step.name].append(step.output)
+            self._mock_outputs[step.name].append(step)

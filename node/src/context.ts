@@ -1,12 +1,20 @@
 import { Step, StepHandle } from "./step";
-import { TraceData } from "./tracing";
+import { StepData, TraceData } from "./tracing";
+
+export interface JudgeRecord {
+  criteria: string;
+  score: number;
+  passed: boolean;
+  reasoning: string;
+}
 
 export class VevalExecutionContext {
   readonly traceId: string;
   readonly input: unknown;
   private _steps: Step[] = [];
   private _metadata: Record<string, unknown> = {};
-  private _mockOutputs: Map<string, unknown[]> | null = null;
+  private _judgments: JudgeRecord[] = [];
+  private _mockOutputs: Map<string, StepData[]> | null = null;
   private _strictMockMode = false;
 
   constructor(traceId: string, input: unknown) {
@@ -22,8 +30,16 @@ export class VevalExecutionContext {
     return this._metadata;
   }
 
+  get judgments(): readonly JudgeRecord[] {
+    return this._judgments;
+  }
+
   setMetadata(key: string, value: unknown): void {
     this._metadata[key] = value;
+  }
+
+  recordJudgment(criteria: string, score: number, passed: boolean, reasoning: string): void {
+    this._judgments.push({ criteria, score, passed, reasoning });
   }
 
   async trackStepAsync<T>(
@@ -46,9 +62,12 @@ export class VevalExecutionContext {
     if (this._mockOutputs !== null) {
       const q = this._mockOutputs.get(name);
       if (q && q.length > 0) {
-        const mock = q.shift()!;
+        const recorded = q.shift()!;
+        const mock = recorded.output;
         const s = new Step(name);
         s.input = input;
+        // Keep the recorded type so toolCalled and snapshot types behave the same as in the original run.
+        s.type = recorded.type ?? "custom";
         s.metadata["_source"] = "replay";
         s.complete(mock);
         this._steps.push(s);
@@ -88,7 +107,7 @@ export class VevalExecutionContext {
       if (!this._mockOutputs.has(step.name)) {
         this._mockOutputs.set(step.name, []);
       }
-      this._mockOutputs.get(step.name)!.push(step.output);
+      this._mockOutputs.get(step.name)!.push(step);
     }
   }
 }

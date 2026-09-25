@@ -26,7 +26,7 @@ public class ReplayTests
     [Fact]
     public async Task ReplayAsync_WithMocking_ReturnsRecordedOutputs()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {
@@ -45,7 +45,7 @@ public class ReplayTests
     [Fact]
     public async Task ReplayAsync_ExceedsMaxSteps_Fails()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {
@@ -61,7 +61,7 @@ public class ReplayTests
     [Fact]
     public async Task ReplayAsync_WithError_DetectedByNoErrors()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {
@@ -75,7 +75,7 @@ public class ReplayTests
     [Fact]
     public async Task ToolCalled_WhenToolStepPresent_Passes()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {
@@ -93,7 +93,7 @@ public class ReplayTests
     [Fact]
     public async Task ToolCalled_WhenStepExistsButWrongType_Fails()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {
@@ -108,7 +108,7 @@ public class ReplayTests
     [Fact]
     public async Task ToolCalled_WhenToolStepAbsent_Fails()
     {
-        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var trace = CreateSampleTrace();
         var result = await sdk.ReplayAsync(trace, async ctx =>
         {

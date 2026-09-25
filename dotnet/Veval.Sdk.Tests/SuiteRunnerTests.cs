@@ -7,7 +7,7 @@ namespace Veval.Sdk.Tests;
 public class ScenarioRunnerTests
 {
     private static VevalSdk MakeSdk() =>
-        new VevalSdk(new VevalOptions { ApiKey = "test", Endpoint = "http://localhost:0" });
+        new VevalSdk(new VevalOptions { ApiKey = "test" });
 
     [Fact]
     public async Task RunScenarioAsync_TraceNotFound_ItemFailsWithNotFound()

@@ -2,7 +2,7 @@
 
 Observability, replay testing, and snapshot testing for AI agents. Add a few lines of code to trace every step your agent takes, then debug, replay, and test in production-like conditions.
 
-This is the C# reference implementation. SDKs for Python, TypeScript, Go, and Java are auto-generated from the OpenAPI spec via [Speakeasy](https://speakeasyapi.dev/).
+This is the C# SDK. Node and Python SDKs share the same concepts and wire format.
 
 ## Installation
 
@@ -15,197 +15,128 @@ dotnet add package Veval.Sdk
 ```csharp
 using Veval.Sdk;
 
-var veval = new AgentSdk(new AgentOptions
+using var veval = new VevalSdk(new VevalOptions { ApiKey = "vk_your_api_key" });
+
+var answer = await veval.RunAsync("my-agent", async ctx =>
 {
-    ApiKey = "vk_your_api_key",
-    ProjectId = "your-project-id",
-});
+    return await ctx.TrackStepAsync("call-llm", "What is the capital of France?", async step =>
+    {
+        var response = await CallYourLlm("What is the capital of France?");
 
-var result = await veval.RunAsync<string>("my-agent", async ctx =>
-{
-    var step = ctx.Step("call-llm");
-    step.Type = "llm";
-    step.Input = "What is the capital of France?";
-
-    var answer = await CallYourLlm(step.Input);
-
-    step.Output = answer;
-    step.Model = "gpt-4";
-    step.TokensIn = 12;
-    step.TokensOut = 8;
-    step.CostUsd = 0.002m;
-    step.Complete(answer);
-
-    return answer;
+        step.SetMeta("type", "llm");
+        step.SetMeta("model", "claude-opus-5");
+        step.SetMeta("tokens_in", 12);
+        step.SetMeta("tokens_out", 8);
+        step.SetMeta("cost_usd", 0.0003m);
+        return response;
+    });
 });
 ```
 
-That's it. The trace is automatically sent to Veval where you can visualize it, replay it, and set up failure detection.
+That's it. The trace is sent to Veval, where you can inspect it, replay it, and test against it.
 
 ## Core Concepts
 
-### AgentSdk
+### VevalSdk
 
 The main entry point. Create one instance and reuse it across your application.
 
 ```csharp
-var veval = new AgentSdk(new AgentOptions
+var veval = new VevalSdk(new VevalOptions
 {
-    ApiKey = "vk_...",            // Required. Your Veval API key.
-    ProjectId = "my-project",     // Required. Groups traces in the dashboard.
-    Endpoint = "https://api.veval.dev", // Optional. Self-hosted override.
-    FlushIntervalMs = 5000,       // Optional. Batch flush interval.
-    FlushBatchSize = 50,          // Optional. Max traces per batch.
+    ApiKey = "vk_...",   // Required. Your Veval API key — it also determines the workspace.
 });
 ```
 
-`AgentSdk` implements `IDisposable` — dispose it when your application shuts down.
+`VevalSdk` implements `IDisposable` — dispose it when your application shuts down. Depend on `IVevalSdk` in your own classes so tests can pass in a `VevalTestSdk`.
 
 ### RunAsync
 
 Wraps your agent logic, captures timing, and sends the trace.
 
 ```csharp
-var result = await veval.RunAsync<MyOutput>("agent-name", async ctx =>
+var result = await veval.RunAsync("agent-name", async ctx =>
 {
-    // Your agent logic here.
-    // Use ctx to track steps.
+    // Your agent logic here. Use ctx to track steps.
     return new MyOutput { ... };
 }, input: new { query = "user question" });
 ```
 
-- Automatically records start/end time, duration, and status
-- On success: sends trace with `status: "success"`
-- On exception: sends trace with `status: "error"` and the error message, then re-throws
-- Never swallows exceptions — your error handling stays intact
-- Never throws on network failures to Veval — tracing is fire-and-forget
+- Records start/end time, duration, and status
+- On success: sends the trace with `status: "success"`
+- On exception: sends the trace with `status: "error"` and the error message, then re-throws
+- Never swallows your exceptions, and never throws on network failures to Veval
 
-### AgentContext
+### VevalExecutionContext
 
 Passed into your callback. Use it to track steps and attach metadata.
 
 ```csharp
-// Track a step
-var step = ctx.Step("step-name");
-
-// Attach trace-level metadata
-ctx.SetMetadata("user_id", "u_123");
-ctx.SetMetadata("environment", "production");
-
-// Access the trace ID (e.g., for logging)
-Console.WriteLine(ctx.TraceId);
+ctx.SetMetadata("user_id", "u_123");   // trace-level metadata
+Console.WriteLine(ctx.TraceId);         // e.g. for logging
+var input = ctx.Input;                  // the input passed to RunAsync
+var steps = ctx.Steps;                  // steps recorded so far (read-only)
 ```
 
 ### Steps
 
-Steps are the building blocks of a trace. They represent individual operations your agent performs.
+Steps are the building blocks of a trace: each operation your agent performs. `TrackStepAsync` runs your code, records its input, output, and duration, and marks the step as failed if it throws (the exception still propagates).
 
 ```csharp
-var step = ctx.Step("retrieve-documents");
-step.Type = "retrieval";          // Categorize: "llm", "tool", "retrieval", "custom"
-step.Input = searchQuery;
-
-var docs = await vectorDb.Search(searchQuery);
-
-step.Output = docs;
-step.Complete();                  // Marks success, records duration
-```
-
-If something goes wrong:
-
-```csharp
-try
+var docs = await ctx.TrackStepAsync("retrieve-documents", searchQuery, async step =>
 {
-    var response = await CallLlm(prompt);
-    step.Complete(response);
-}
-catch (Exception ex)
-{
-    step.Fail(ex.Message);        // Marks error, records duration
-    throw;
-}
+    step.SetMeta("type", "tool");            // "llm", "tool", "retrieval", "custom" (default)
+    return await vectorDb.Search(searchQuery);
+});
 ```
 
-#### Nested Steps
-
-Steps can have children to represent sub-operations:
+For steps that don't need metadata, pass a plain function:
 
 ```csharp
-var planStep = ctx.Step("planning");
-
-var analyzeStep = planStep.CreateStep("analyze-input");
-analyzeStep.Complete("Input analyzed");
-
-var strategyStep = planStep.CreateStep("choose-strategy");
-strategyStep.Complete("Using retrieval approach");
-
-planStep.Complete();
+var intent = await ctx.TrackStepAsync("classify", message, () => ClassifyAsync(message));
 ```
 
-#### LLM-Specific Properties
+`step.SetMeta` recognizes `type`, `model`, `tokens_in`, `tokens_out`, and `cost_usd`; any other key is stored as step metadata:
 
 ```csharp
-step.Model = "claude-sonnet-4-20250514";
-step.TokensIn = 1500;
-step.TokensOut = 342;
-step.CostUsd = 0.0045m;
+step.SetMeta("provider", "anthropic");
+step.SetMeta("retry_count", 2);
 ```
 
-#### Step Metadata
-
-```csharp
-step.SetMetadata("provider", "openai");
-step.SetMetadata("retry_count", 2);
-```
+Track your agent's steps with the input you actually send — the full prompt for an LLM call, the arguments for a tool. Replay, snapshots, and the judge all work from those inputs.
 
 ## Replay Testing
 
-Record a production trace, then replay your agent with mocked LLM responses and assertions. Catches regressions when you change agent logic.
+Replay a recorded trace through your real agent code with the recorded outputs served for every step — no LLM or API calls, deterministic results.
 
 ```csharp
 using Veval.Sdk.Assertions;
 
-// 1. Fetch a known-good trace
 var trace = await veval.GetTraceAsync("tr_abc123");
 
-// 2. Replay with assertions
-var result = await veval.ReplayAsync<string>(trace, async ctx =>
-{
-    var step = ctx.Step("call-llm");
+var testSdk = new VevalTestSdk(new VevalOptions { ApiKey = "vk_..." });
+var agent = new MyAgent(testSdk);   // your agent, taking IVevalSdk
 
-    // In replay mode, returns the recorded output instead of calling the real LLM
-    var mockedOutput = ctx.GetMockedOutput("call-llm");
-    if (mockedOutput != null)
-    {
-        step.Complete(mockedOutput);
-        return mockedOutput.ToString()!;
-    }
-
-    // Normal path (non-replay)
-    var response = await CallLlm();
-    step.Complete(response);
-    return response;
-}, new ReplayOptions
+var result = await testSdk.ReplayAsync(trace!, agent.ExecuteAsync, new ReplayOptions
 {
     MockLlmResponses = true,
-    Assertions = new ITraceAssertion[]
-    {
+    Assertions =
+    [
         TraceAssert.NoErrors(),
         TraceAssert.MaxSteps(10),
         TraceAssert.StepExists("call-llm"),
-        TraceAssert.MaxCost(0.05m),
-        TraceAssert.MaxDuration(5000),
         TraceAssert.OutputContains("expected text"),
-    },
+    ],
+    // Also fail if the replay's steps or inputs drift from the recording.
+    CompareWithRecording = new SnapshotOptions(),
 });
 
-// 3. Check results
-if (result.Passed)
-    Console.WriteLine("Replay passed!");
-else
+if (!result.Passed)
     foreach (var failure in result.Failures)
         Console.WriteLine($"FAIL: {failure}");
 ```
+
+In replay, `TrackStepAsync` returns the recorded output instead of running your code. A step with no recorded output throws rather than silently making a live call. To replay your production entry point unchanged, use `new VevalTestSdk(options).WithReplay(trace)` and call your agent as usual.
 
 ### Built-in Assertions
 
@@ -214,132 +145,153 @@ else
 | `TraceAssert.NoErrors()` | No step has error status |
 | `TraceAssert.MaxSteps(n)` | Total step count <= n |
 | `TraceAssert.StepExists("name")` | A step with this name exists |
+| `TraceAssert.ToolCalled("name")` | A step of type `tool` with this name exists |
 | `TraceAssert.MaxCost(decimal)` | Total cost across all steps <= threshold |
 | `TraceAssert.MaxDuration(ms)` | Total duration across all steps <= threshold |
 | `TraceAssert.OutputContains("text")` | At least one step output contains the text |
+| `TraceAssert.Judge(veval, criteria, options?)` | An LLM judge scores the output against a plain-English rubric |
+| `TraceAssert.MatchesSnapshot(...)` | Steps and step inputs match a stored baseline |
+
+In tests, `testSdk.WithJudgeMock(criteria, passed, score, reasoning)` makes `Judge` deterministic and free; without a mock the test SDK throws instead of making a billed call.
 
 ### Custom Assertions
 
-Implement `ITraceAssertion` for domain-specific checks:
+Implement `ITraceAssertion` for domain-specific checks. Return `null` to pass, or a failure message:
 
 ```csharp
-public class NoHallucinationAssertion : ITraceAssertion
+public class NoSecretsInPrompts : ITraceAssertion
 {
-    public string? Evaluate(AgentContext ctx)
+    public Task<string?> EvaluateAsync(VevalExecutionContext ctx)
     {
-        // Return null if passed, or a failure message string
-        return null;
+        var leaked = ctx.Steps.FirstOrDefault(s => s.Input?.ToString()?.Contains("sk-") == true);
+        return Task.FromResult(leaked is null ? null : $"Step '{leaked.Name}' sent a secret");
     }
 }
 ```
 
-## Snapshot Testing
+## Scenarios
 
-Capture a baseline of your agent's step structure, then detect when it drifts.
+Run a named set of test cases — fixed inputs (live) or recorded trace IDs (replayed) — against shared and per-item assertions. Results are recorded in the dashboard.
 
 ```csharp
-// After a run, capture the snapshot from the context
-var snapshot = SnapshotData.FromContext(ctx);
-// snapshot.StepNames  — distinct step names
-// snapshot.StepOrder  — ordered list (including repeats)
-// snapshot.StepCount  — total count
+var result = await veval.RunScenarioAsync(
+    scenarioName: "support-quality",
+    agent: agent.ExecuteAsync,
+    scenarioAssertions: [TraceAssert.NoErrors(), TraceAssert.Judge(veval, "The reply is polite and on-topic.")],
+    items:
+    [
+        new ScenarioItem { Name = "refund request", Input = "I want a refund" },
+        new ScenarioItem { Name = "recorded escalation", TraceId = "tr_abc123" },
+    ]);
 
-// Later, compare against a new run
-var diff = SnapshotComparer.Compare(snapshot, newCtx);
-
-if (diff.HasChanges)
-{
-    Console.WriteLine("Added steps: " + string.Join(", ", diff.AddedSteps));
-    Console.WriteLine("Removed steps: " + string.Join(", ", diff.RemovedSteps));
-    Console.WriteLine("Order changes: " + string.Join(", ", diff.OrderChanges));
-}
+Console.WriteLine($"{result.PassCount}/{result.Results.Count} passed");
 ```
 
-Snapshots can be stored via the Veval API (`POST /api/snapshots`, `GET /api/snapshots/{id}`) for persistent baseline management.
+## Snapshot Testing
+
+Store a known-good run — every step with its input and output — then detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered.
+
+```csharp
+// Save a baseline from a recorded trace. The trace is pinned, so retention never deletes it.
+await veval.SaveSnapshotAsync("my-agent-baseline", "tr_abc123");
+
+// In tests: an assertion like any other. A missing baseline fails; it never passes silently.
+var result = await testSdk.ReplayAsync(trace, agent.ExecuteAsync, new ReplayOptions
+{
+    MockLlmResponses = true,
+    Assertions = [TraceAssert.MatchesSnapshot(testSdk, "my-agent-baseline")],
+});
+
+// Or compare directly, and record the result in the dashboard.
+var baseline = await veval.GetSnapshotAsync("my-agent-baseline");
+var diff = await veval.CompareSnapshotAsync("my-agent-baseline", baseline!, ctx);
+if (diff.HasChanges)
+    Console.WriteLine(diff.Summary());   // every change, with a line diff of changed inputs
+```
+
+`SnapshotOptions` controls what's compared: `CompareInputs` (default on), `CompareOutputs` (default off), `IgnoreSteps`, `IgnoreFields` (e.g. `timestamp`), and `Normalize`. For offline CI, register a baseline with `testSdk.WithSnapshot(name, snapshot)`.
 
 ## Full Example
 
 ```csharp
 using Veval.Sdk;
-using Veval.Sdk.Assertions;
 
-using var veval = new AgentSdk(new AgentOptions
+public class SupportAgent(IVevalSdk veval, IMyLlm llm, IKnowledgeBase kb)
 {
-    ApiKey = Environment.GetEnvironmentVariable("VEVAL_API_KEY")!,
-    ProjectId = "customer-support",
-});
+    public Task<string> AnswerAsync(string message) =>
+        veval.RunAsync("support-agent", ctx => ExecuteAsync(ctx), input: message);
 
-var result = await veval.RunAsync<string>("support-agent", async ctx =>
-{
-    ctx.SetMetadata("user_id", "u_456");
+    // Takes a context, so tests can pass it to ReplayAsync / RunScenarioAsync directly.
+    public async Task<string> ExecuteAsync(VevalExecutionContext ctx)
+    {
+        var message = ctx.Input?.ToString() ?? "";
+        ctx.SetMetadata("channel", "chat");
 
-    // Step 1: Classify intent
-    var classify = ctx.Step("classify-intent");
-    classify.Type = "llm";
-    classify.Input = ctx.Input;
-    var intent = await ClassifyIntent(ctx.Input!.ToString()!);
-    classify.Model = "claude-haiku-4-5-20251001";
-    classify.TokensIn = 50;
-    classify.TokensOut = 10;
-    classify.CostUsd = 0.0001m;
-    classify.Complete(intent);
+        var intent = await ctx.TrackStepAsync("classify-intent", message, async step =>
+        {
+            step.SetMeta("type", "llm");
+            step.SetMeta("model", "claude-haiku-4-5");
+            return await llm.ClassifyAsync(message);
+        });
 
-    // Step 2: Retrieve knowledge
-    var retrieve = ctx.Step("retrieve-docs");
-    retrieve.Type = "retrieval";
-    var docs = await SearchKnowledgeBase(intent);
-    retrieve.Complete(docs);
+        var docs = await ctx.TrackStepAsync("retrieve-docs", intent, async step =>
+        {
+            step.SetMeta("type", "tool");
+            return await kb.SearchAsync(intent);
+        });
 
-    // Step 3: Generate response
-    var respond = ctx.Step("generate-response");
-    respond.Type = "llm";
-    respond.Input = new { intent, docs };
-    var response = await GenerateResponse(intent, docs);
-    respond.Model = "claude-sonnet-4-20250514";
-    respond.TokensIn = 2000;
-    respond.TokensOut = 500;
-    respond.CostUsd = 0.012m;
-    respond.Complete(response);
-
-    return response;
-}, input: new { message = "I need help with my order" });
+        return await ctx.TrackStepAsync("generate-response", new { intent, docs }, async step =>
+        {
+            step.SetMeta("type", "llm");
+            step.SetMeta("model", "claude-opus-5");
+            return await llm.RespondAsync(message, docs);
+        });
+    }
+}
 ```
 
 ## API Reference
 
-### AgentSdk
+### VevalSdk / IVevalSdk
 
 | Method | Description |
 |--------|-------------|
 | `RunAsync<T>(agentName, callback, input?)` | Run agent logic with automatic tracing |
 | `GetTraceAsync(traceId)` | Fetch a trace by ID (returns `TraceData?`) |
-| `ReplayAsync<T>(trace, callback, options)` | Replay a trace with assertions |
-| `Dispose()` | Clean up HTTP resources |
+| `ReplayAsync<T>(trace, callback, options)` | Replay a trace with recorded outputs and assertions |
+| `RunScenarioAsync<T>(name, agent, assertions, items?)` | Run a scenario; omit `items` to load them from the dashboard |
+| `JudgeAsync(criteria, ctx, options?)` | Score a run against a rubric (used by `TraceAssert.Judge`) |
+| `SaveSnapshotAsync(name, traceId)` / `SaveSnapshotAsync(name, ctx)` | Store a named baseline; saving by trace pins it |
+| `GetSnapshotAsync(name)` | Load the latest stored baseline (`null` if none) |
+| `CompareSnapshotAsync(name, snapshot, ctx, options?)` | Diff a run against a baseline and record it |
+| `LoadSnapshotAsync(traceId)` | Build a snapshot from a trace on the fly (not pinned) |
 
-### AgentContext
+### VevalTestSdk
+
+Everything above, plus: `WithReplay(trace)`, `WithJudgeMock(criteria, passed, score, reasoning)`, `WithSnapshot(name, snapshot)`, `LastStatus`, `LastError`.
+
+### VevalExecutionContext
 
 | Member | Description |
 |--------|-------------|
-| `Step(name)` | Create a top-level step |
+| `TrackStepAsync(name, input, step => ...)` | Run and record a step |
 | `SetMetadata(key, value)` | Attach key-value metadata to the trace |
-| `GetMockedOutput(stepName)` | Get mocked output during replay (returns `null` outside replay) |
 | `TraceId` | The trace ID for this run |
 | `Input` | The input passed to `RunAsync` |
+| `Steps` | Steps recorded so far (read-only) |
+| `Judgments` | Judge verdicts recorded during this run (read-only) |
 
-### Step
+### Step (as seen through `ctx.Steps`)
 
 | Member | Description |
 |--------|-------------|
-| `Complete(output?)` | Mark step as successful |
-| `Fail(error)` | Mark step as failed |
-| `CreateStep(name)` | Create a nested child step |
-| `SetMetadata(key, value)` | Attach key-value metadata to the step |
-| `Type` | Step category: `"llm"`, `"tool"`, `"retrieval"`, `"custom"` |
-| `Input` / `Output` | Step input and output data |
-| `Model` | LLM model name |
-| `TokensIn` / `TokensOut` | Token usage |
-| `CostUsd` | Cost in USD |
+| `Name`, `Type` | Step name and category (`"llm"`, `"tool"`, `"custom"`, …) |
+| `Input` / `Output` | Step input and output |
+| `Status`, `Error` | `"success"` or `"error"`, and the error message |
+| `DurationMs` | Step duration |
+| `Model`, `TokensIn`, `TokensOut`, `CostUsd` | LLM usage, when set via `SetMeta` |
+| `Metadata` | Other key-value metadata |
 
 ## License
 
-Proprietary. See LICENSE for details.
+MIT. See LICENSE for details.

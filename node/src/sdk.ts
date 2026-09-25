@@ -1,22 +1,21 @@
-import { VevalOptions, resolveOptions } from "./options";
+import { VevalOptions, ResolvedVevalOptions, resolveOptions } from "./options";
 import { VevalExecutionContext } from "./context";
 import { Step } from "./step";
+import { TraceData, StepData, ReplayOptions, ReplayResult } from "./tracing";
 import {
-  TraceData,
-  StepData,
   SnapshotData,
   SnapshotDataHelper,
   SnapshotDiff,
   SnapshotComparer,
-  ReplayOptions,
-  ReplayResult,
-} from "./tracing";
-import { ITraceAssertion } from "./assertions";
+  SnapshotOptions,
+  SnapshotPayloads,
+} from "./snapshots";
+import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 
 export class VevalSdk {
-  protected readonly opts: Required<VevalOptions>;
+  protected readonly opts: ResolvedVevalOptions;
   protected readonly http: VevalHttpClient;
 
   constructor(options: VevalOptions) {
@@ -37,7 +36,7 @@ export class VevalSdk {
       const result = await callback(ctx);
       const completedAt = new Date();
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input ?? null, result, "success", null, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -46,7 +45,7 @@ export class VevalSdk {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input ?? null, null, "error", error, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -58,35 +57,50 @@ export class VevalSdk {
     return this.http.getTraceAsync(traceId);
   }
 
+  async judgeAsync(criteria: string, ctx: VevalExecutionContext, options?: JudgeOptions): Promise<JudgeResult> {
+    const lastStep = ctx.steps[ctx.steps.length - 1];
+    const payload = {
+      criteria,
+      input: lastStep ? lastStep.input : ctx.input,
+      output: lastStep ? lastStep.output : null,
+      model: options?.model ?? null,
+      threshold: options?.threshold ?? null,
+      reference_output: options?.referenceOutput ?? null,
+      samples: options?.samples ?? null,
+    };
+    return this.http.judgeAsync(payload);
+  }
+
   async loadSnapshotAsync(traceId: string): Promise<SnapshotData | null> {
     const trace = await this.http.getTraceAsync(traceId);
     return trace ? SnapshotDataHelper.fromTrace(trace) : null;
   }
 
+  /**
+   * Stores a named baseline — from a recorded trace ID (the trace is pinned so retention never deletes it),
+   * or from a run you just executed. Saving again under the same name replaces the baseline.
+   */
+  async saveSnapshotAsync(snapshotName: string, source: string | VevalExecutionContext): Promise<SnapshotData> {
+    const payload = typeof source === "string"
+      ? SnapshotPayloads.saveFromTrace(snapshotName, source)
+      : SnapshotPayloads.saveFromContext(snapshotName, source);
+    return this.http.createSnapshotAsync(payload);
+  }
+
+  /** The latest stored baseline with this name, or null if none exists. */
+  async getSnapshotAsync(snapshotName: string): Promise<SnapshotData | null> {
+    return this.http.getSnapshotAsync(snapshotName);
+  }
+
+  /** Compares a run against a baseline and records the result in the dashboard. */
   async compareSnapshotAsync(
     snapshotName: string,
     snapshot: SnapshotData,
-    ctx: VevalExecutionContext
+    ctx: VevalExecutionContext,
+    options?: SnapshotOptions
   ): Promise<SnapshotDiff> {
-    const diff = SnapshotComparer.compare(snapshot, ctx);
-    const actual = SnapshotDataHelper.fromContext(ctx);
-    await this.http.postScenarioRunAsync(snapshotName, {
-      passed: !diff.has_changes,
-      pass_count: diff.has_changes ? 0 : 1,
-      fail_count: diff.has_changes ? 1 : 0,
-      results: [{
-        name: snapshotName,
-        passed: !diff.has_changes,
-        type: "snapshot",
-        expected: snapshot.steps.map((s) => ({ name: s.name, output: s.output })),
-        actual: actual.steps.map((s) => ({ name: s.name, output: s.output })),
-        failures: [
-          ...diff.added_steps.map((s) => `added: ${s}`),
-          ...diff.removed_steps.map((s) => `removed: ${s}`),
-          ...diff.order_changes,
-        ],
-      }],
-    });
+    const diff = SnapshotComparer.compare(snapshot, ctx, options);
+    await this.http.postScenarioRunAsync(snapshotName, SnapshotPayloads.run(snapshotName, diff));
     return diff;
   }
 
@@ -116,14 +130,22 @@ export class VevalSdk {
     const failures: string[] = [];
     if (error) failures.push(`Replay threw exception: ${error}`);
     for (const assertion of options?.assertions ?? []) {
-      const failure = assertion.evaluate(ctx);
+      const failure = await assertion.evaluate(ctx);
       if (failure) failures.push(failure);
+    }
+
+    let recordingDiff: SnapshotDiff | null = null;
+    if (options?.compare_with_recording) {
+      recordingDiff = SnapshotComparer.compare(SnapshotDataHelper.fromTrace(trace), ctx, options.compare_with_recording);
+      if (recordingDiff.has_changes)
+        failures.push("Replay drifted from its recording — " + recordingDiff.summary(`recording ${trace.trace_id}`));
     }
 
     return {
       passed: failures.length === 0,
       failures,
       replayed_context: ctx,
+      recording_diff: recordingDiff,
       output,
       started_at: startedAt.toISOString(),
       completed_at: completedAt.toISOString(),
@@ -162,7 +184,7 @@ export class VevalSdk {
           if (replayResult.replayed_context) {
             const replayCtx = replayResult.replayed_context;
             const payload = VevalSdk.buildPayload(
-              replayCtx.traceId, scenarioName, this.opts.projectId, replayCtx,
+              replayCtx.traceId, scenarioName, replayCtx,
               trace.input, replayResult.output, replayResult.status, replayResult.error,
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
@@ -173,7 +195,7 @@ export class VevalSdk {
       } else if (item.input !== undefined) {
         const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input);
         for (const assertion of effectiveAssertions) {
-          const failure = assertion.evaluate(ctx);
+          const failure = await assertion.evaluate(ctx);
           if (failure) {
             itemResult.failures.push(failure);
             itemResult.passed = false;
@@ -205,6 +227,7 @@ export class VevalSdk {
         name: r.item.name ?? r.item.trace_id ?? "synthetic",
         passed: r.passed,
         failures: r.failures,
+        judgments: r.context?.judgments ?? [],
       })),
     });
 
@@ -224,7 +247,7 @@ export class VevalSdk {
       const result = await agent(ctx);
       const completedAt = new Date();
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input, result, "success", null, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -232,7 +255,7 @@ export class VevalSdk {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input, null, "error", error, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -244,7 +267,6 @@ export class VevalSdk {
   static buildPayload(
     traceId: string,
     agentName: string,
-    projectId: string,
     ctx: VevalExecutionContext,
     input: unknown,
     output: unknown,
@@ -262,7 +284,6 @@ export class VevalSdk {
     return {
       trace_id: traceId,
       agent_name: agentName,
-      project_id: projectId,
       input,
       output,
       status,
