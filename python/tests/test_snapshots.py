@@ -4,6 +4,7 @@ import json
 import os
 import sys
 
+os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never reach the real API
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from veval import (  # noqa: E402

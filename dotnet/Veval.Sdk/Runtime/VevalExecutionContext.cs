@@ -15,9 +15,12 @@ public class VevalExecutionContext
     private Dictionary<string, Queue<StepData>>? _mockOutputs;
     private bool _strictMockMode;
 
-    internal IReadOnlyList<Step> Steps => _steps;
-    internal IReadOnlyDictionary<string, object> TraceMeta => _metadata;
-    internal IReadOnlyList<JudgeRecord> Judgments => _judgments;
+    /// <summary>Steps recorded so far, in order — readable by custom assertions.</summary>
+    public IReadOnlyList<Step> Steps => _steps;
+    /// <summary>Trace-level metadata set with <see cref="SetMetadata"/>.</summary>
+    public IReadOnlyDictionary<string, object> TraceMeta => _metadata;
+    /// <summary>Judge verdicts recorded by <c>TraceAssert.Judge</c> during this run.</summary>
+    public IReadOnlyList<JudgeRecord> Judgments => _judgments;
 
     public VevalExecutionContext(string traceId, object? input)
     {

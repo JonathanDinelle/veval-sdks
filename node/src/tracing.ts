@@ -24,7 +24,8 @@ export interface StepData {
 export interface TraceData {
   trace_id: string;
   agent_name: string;
-  project_id: string;
+  /** Present on traces loaded from older API versions; no longer sent. */
+  project_id?: string;
   input: unknown;
   output: unknown;
   status: string;

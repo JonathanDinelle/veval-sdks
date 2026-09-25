@@ -147,8 +147,8 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `api_key` | `str` | `""` | Your Veval API key |
-| `project_id` | `str` | `""` | Optional project scoping |
+| `api_key` | `str` | `""` | Your Veval API key — it also determines the workspace |
+| `project_id` | `str` | `""` | Deprecated and ignored; will be removed |
 | `flush_interval_ms` | `int` | `5000` | Batch flush interval |
 | `flush_batch_size` | `int` | `50` | Max traces per flush |
 

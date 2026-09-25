@@ -1,4 +1,4 @@
-import { VevalOptions, resolveOptions } from "./options";
+import { VevalOptions, ResolvedVevalOptions, resolveOptions } from "./options";
 import { VevalExecutionContext } from "./context";
 import { Step } from "./step";
 import { TraceData, StepData, ReplayOptions, ReplayResult } from "./tracing";
@@ -15,7 +15,7 @@ import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 
 export class VevalSdk {
-  protected readonly opts: Required<VevalOptions>;
+  protected readonly opts: ResolvedVevalOptions;
   protected readonly http: VevalHttpClient;
 
   constructor(options: VevalOptions) {
@@ -36,7 +36,7 @@ export class VevalSdk {
       const result = await callback(ctx);
       const completedAt = new Date();
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input ?? null, result, "success", null, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -45,7 +45,7 @@ export class VevalSdk {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input ?? null, null, "error", error, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -184,7 +184,7 @@ export class VevalSdk {
           if (replayResult.replayed_context) {
             const replayCtx = replayResult.replayed_context;
             const payload = VevalSdk.buildPayload(
-              replayCtx.traceId, scenarioName, this.opts.projectId, replayCtx,
+              replayCtx.traceId, scenarioName, replayCtx,
               trace.input, replayResult.output, replayResult.status, replayResult.error,
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
@@ -247,7 +247,7 @@ export class VevalSdk {
       const result = await agent(ctx);
       const completedAt = new Date();
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input, result, "success", null, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -255,7 +255,7 @@ export class VevalSdk {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input, null, "error", error, startedAt, completedAt
       );
       await this.http.sendTraceAsync(payload);
@@ -267,7 +267,6 @@ export class VevalSdk {
   static buildPayload(
     traceId: string,
     agentName: string,
-    projectId: string,
     ctx: VevalExecutionContext,
     input: unknown,
     output: unknown,
@@ -285,7 +284,6 @@ export class VevalSdk {
     return {
       trace_id: traceId,
       agent_name: agentName,
-      project_id: projectId,
       input,
       output,
       status,

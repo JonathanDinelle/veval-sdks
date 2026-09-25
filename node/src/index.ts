@@ -1,4 +1,4 @@
-export { VevalOptions, resolveOptions } from "./options";
+export { VevalOptions, ResolvedVevalOptions, resolveOptions } from "./options";
 export { Step, StepHandle } from "./step";
 export { VevalExecutionContext, JudgeRecord } from "./context";
 export { StepData, TraceData, ReplayOptions, ReplayResult } from "./tracing";

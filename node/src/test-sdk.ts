@@ -83,7 +83,7 @@ export class VevalTestSdk extends VevalSdk {
       const extraMeta: Record<string, unknown> = { replay: true };
       if (this._replayTrace) extraMeta["source_trace_id"] = this._replayTrace.trace_id;
       const payload = VevalSdk.buildPayload(
-        traceId, agentName, this.opts.projectId, ctx,
+        traceId, agentName, ctx,
         input ?? null, null, status, error, startedAt, completedAt, extraMeta
       );
       await this.http.sendTraceAsync(payload);
@@ -94,7 +94,7 @@ export class VevalTestSdk extends VevalSdk {
     const extraMeta: Record<string, unknown> = { replay: true };
     if (this._replayTrace) extraMeta["source_trace_id"] = this._replayTrace.trace_id;
     const payload = VevalSdk.buildPayload(
-      traceId, agentName, this.opts.projectId, ctx,
+      traceId, agentName, ctx,
       input ?? null, output, status, error, startedAt, completedAt, extraMeta
     );
     await this.http.sendTraceAsync(payload);
@@ -151,7 +151,7 @@ export class VevalTestSdk extends VevalSdk {
           if (replayResult.replayed_context) {
             const replayCtx = replayResult.replayed_context;
             const payload = VevalSdk.buildPayload(
-              replayCtx.traceId, scenarioName, this.opts.projectId, replayCtx,
+              replayCtx.traceId, scenarioName, replayCtx,
               trace.input, replayResult.output, replayResult.status, replayResult.error,
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }

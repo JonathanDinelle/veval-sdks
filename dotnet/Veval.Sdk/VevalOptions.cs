@@ -3,6 +3,7 @@ namespace Veval.Sdk;
 public class VevalOptions
 {
     public string ApiKey { get; set; } = string.Empty;
+    [Obsolete("Ignored: the API key determines the workspace. Will be removed in a future version.")]
     public string ProjectId { get; set; } = string.Empty;
 
     // Points at Veval's own hosted API, which enforces billing/quota (test-run limits, judge

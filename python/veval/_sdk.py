@@ -21,7 +21,7 @@ T = TypeVar("T")
 class VevalSdk:
     def __init__(self, options: VevalOptions):
         self._options = options
-        self._client = VevalHttpClient(options.api_key, options.endpoint)
+        self._client = VevalHttpClient(options.api_key, options._endpoint)
 
     async def run_async(
         self,
