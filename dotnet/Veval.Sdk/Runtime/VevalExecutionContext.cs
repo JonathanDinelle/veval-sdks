@@ -1,8 +1,14 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Veval.Sdk;
 
-public record JudgeRecord(string Criteria, double Score, bool Passed, string Reasoning);
+/// <summary>A judge verdict. Serialized in lowercase to match the Node and Python SDKs and the dashboard.</summary>
+public record JudgeRecord(
+    [property: JsonPropertyName("criteria")] string Criteria,
+    [property: JsonPropertyName("score")] double Score,
+    [property: JsonPropertyName("passed")] bool Passed,
+    [property: JsonPropertyName("reasoning")] string Reasoning);
 
 public class VevalExecutionContext
 {

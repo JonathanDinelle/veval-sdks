@@ -187,4 +187,12 @@ public class JudgeTests
         result.Results[0].Context!.Judgments.Should().ContainSingle();
         result.Results[0].Context!.Judgments[0].Score.Should().Be(0.9);
     }
+
+    [Fact]
+    public void JudgeRecord_SerializesInLowercase_LikeTheOtherSdksAndTheDashboardExpect()
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(new JudgeRecord("polite", 0.9, true, "Friendly."));
+
+        json.Should().Be("""{"criteria":"polite","score":0.9,"passed":true,"reasoning":"Friendly."}""");
+    }
 }
