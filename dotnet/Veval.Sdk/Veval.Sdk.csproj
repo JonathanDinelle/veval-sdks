@@ -5,9 +5,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <Version>1.1.0</Version>
     <Title>Veval SDK</Title>
     <Description>Veval SDK allows testing AI Agents with a few lines.</Description>
     <PackageProjectUrl>https://veval.dev</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/JonathanDinelle/veval-sdks</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageIcon>logo.png</PackageIcon>
     <PackageTags>evaluation;testing;ai;llm;agents;tracing;assertions;scenarios;observability;evals</PackageTags>

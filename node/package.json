@@ -1,13 +1,37 @@
 {
-  "name": "veval-sdk",
-  "version": "1.0.0",
-  "description": "Veval SDK allows testing AI Agents with a few lines.",
+  "name": "@veval/sdk",
+  "version": "1.1.0",
+  "description": "Trace, evaluate, and test AI agents with a few lines of code.",
   "license": "MIT",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "ai",
+    "agents",
+    "llm",
+    "evaluation",
+    "testing",
+    "tracing"
+  ],
+  "homepage": "https://veval.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JonathanDinelle/veval-sdks.git",
+    "directory": "node"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
-    "test": "tsc -p tsconfig.test.json && node --test \"build/test/**/*.test.js\""
+    "test": "tsc -p tsconfig.test.json && node --test build/test/",
+    "prepublishOnly": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^22.20.4",
