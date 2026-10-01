@@ -44,6 +44,9 @@ dotnet nuget push out/Veval.Sdk.<version>.nupkg --api-key <key> --source https:/
 
 ## Python SDK
 
+Normally published by `.github/workflows/publish.yml` on the same `v*` tag: bump the version in
+`python/pyproject.toml` first. The manual steps below are the fallback.
+
 ```bash
 cd sdk/python
 

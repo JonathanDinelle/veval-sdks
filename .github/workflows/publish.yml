@@ -1,9 +1,13 @@
-name: Publish Node SDK
+name: Publish SDKs
 
-# Push a tag like v1.2.0 (after bumping the version in node/package.json) to stage @veval/sdk on npm.
-# Authentication is npm trusted publishing (OIDC): no stored token. The version goes live only once
-# a maintainer approves it on npmjs.com or with `npm stage approve`.
-# A version already on npm is skipped, so a re-run is safe.
+# Push a tag like v1.2.0 (after bumping the version in node/package.json and python/pyproject.toml)
+# to release the Node and Python SDKs. Both registries authenticate the workflow through trusted
+# publishing (OIDC), so there are no stored tokens.
+# - Node: @veval/sdk is staged on npm and goes live only once a maintainer approves it on npmjs.com
+#   or with `npm stage approve`.
+# - Python: veval-sdk is published to PyPI directly. Add required reviewers to the `pypi`
+#   environment in the repository settings to put the same approval step in front of it.
+# A version already on its registry is skipped, so a re-run is safe.
 on:
   push:
     tags: ["v*"]
@@ -38,3 +42,21 @@ jobs:
           else
             npm stage publish
           fi
+
+  python:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install build pytest pytest-asyncio
+      - run: python -m pytest -q
+        working-directory: python
+      - run: python -m build
+        working-directory: python
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+          skip-existing: true
