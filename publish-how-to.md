@@ -5,6 +5,11 @@ All three SDKs share one version number. Bump it in `node/package.json`,
 
 ## Node SDK
 
+Normally published by `.github/workflows/publish.yml`: bump the version in `node/package.json`,
+merge, and push a tag like `v1.2.0`. The workflow stages the version on npm; approve it at
+https://www.npmjs.com/package/@veval/sdk (or `npm stage approve`) to make it live. The manual
+steps below are the fallback.
+
 The package is `@veval/sdk`, so the npm account publishing it must own or belong to the
 `veval` organization (create it once at https://www.npmjs.com/org/create, free for public
 packages).
