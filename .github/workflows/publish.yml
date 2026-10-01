@@ -1,12 +1,13 @@
 name: Publish SDKs
 
-# Push a tag like v1.2.0 (after bumping the version in node/package.json and python/pyproject.toml)
-# to release the Node and Python SDKs. Both registries authenticate the workflow through trusted
-# publishing (OIDC), so there are no stored tokens.
+# Push a tag like v1.2.0 (after bumping the version in node/package.json, python/pyproject.toml and
+# dotnet/Veval.Sdk/Veval.Sdk.csproj) to release all three SDKs. Every registry authenticates the
+# workflow through trusted publishing (OIDC), so there are no stored tokens.
 # - Node: @veval/sdk is staged on npm and goes live only once a maintainer approves it on npmjs.com
 #   or with `npm stage approve`.
 # - Python: veval-sdk is published to PyPI directly. Add required reviewers to the `pypi`
 #   environment in the repository settings to put the same approval step in front of it.
+# - C#: Veval.Sdk is published to nuget.org directly.
 # A version already on its registry is skipped, so a re-run is safe.
 on:
   push:
@@ -60,3 +61,22 @@ jobs:
         with:
           packages-dir: python/dist
           skip-existing: true
+
+  dotnet:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dotnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet test Veval.Sdk.slnx -c Release
+      - run: dotnet pack Veval.Sdk/Veval.Sdk.csproj -c Release -o out
+      # Exchanges the workflow's OIDC token for a NuGet API key that lasts one hour.
+      - uses: NuGet/login@v1
+        id: nuget
+        with:
+          user: jdinelle
+      - run: dotnet nuget push out/*.nupkg --api-key "${{ steps.nuget.outputs.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

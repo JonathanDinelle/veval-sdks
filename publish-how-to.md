@@ -32,6 +32,9 @@ npm publish
 
 ## C# SDK
 
+Normally published by `.github/workflows/publish.yml` on the same `v*` tag: bump `<Version>` in
+`dotnet/Veval.Sdk/Veval.Sdk.csproj` first. The manual steps below are the fallback.
+
 ```bash
 cd sdk/dotnet
 
