@@ -1,0 +1,39 @@
+name: Publish Node SDK
+
+# Push a tag like v1.2.0 (after bumping the version in node/package.json) to publish @veval/sdk.
+# Authentication is npm trusted publishing (OIDC): no stored token, no 2FA prompt.
+# A version already on npm is skipped, so a re-run is safe.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1 or later.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm test
+      - name: Publish unless this version is already on npm
+        run: |
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "$name@$version" version >/dev/null 2>&1; then
+            echo "$name@$version is already published, skipping."
+          else
+            npm publish
+          fi
