@@ -7,7 +7,7 @@
     <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
     <Version>1.1.0</Version>
     <Title>Veval SDK</Title>
-    <Description>Veval SDK allows testing AI Agents with a few lines.</Description>
+    <Description>Trace, evaluate, and test AI agents with a few lines of code.</Description>
     <PackageProjectUrl>https://veval.dev</PackageProjectUrl>
     <RepositoryUrl>https://github.com/JonathanDinelle/veval-sdks</RepositoryUrl>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
