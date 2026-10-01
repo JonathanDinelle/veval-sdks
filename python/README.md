@@ -177,7 +177,7 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 | `output_contains(text)` | At least one step output must contain `text` |
 | `tool_called(name)` | A tool step with this name must appear |
 
-Custom assertions implement `ITraceAssertion.evaluate(ctx) -> Optional[str]` — return `None` to pass or an error string to fail.
+Custom assertions implement `async ITraceAssertion.evaluate_async(ctx) -> Optional[str]` — return `None` to pass or an error string to fail.
 
 ## Requirements
 

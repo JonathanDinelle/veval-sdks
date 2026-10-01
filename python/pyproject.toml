@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "veval-sdk"
-version = "1.0.0"
+version = "1.1.0"
 description = "Trace, evaluate, and test AI agents with a few lines of code."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -18,6 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Testing",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
@@ -28,5 +29,5 @@ packages = ["veval"]
 
 [project.urls]
 Homepage = "https://veval.dev"
-Documentation = "https://veval.dev/docs"
-Repository = "https://github.com/veval-dev/veval-sdk-python"
+Documentation = "https://docs.veval.dev"
+Repository = "https://github.com/JonathanDinelle/veval-sdks"
