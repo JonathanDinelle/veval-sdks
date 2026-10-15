@@ -1,5 +1,6 @@
 from __future__ import annotations
 import json
+import logging
 from typing import Any, Optional
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -7,11 +8,23 @@ from urllib.error import HTTPError, URLError
 from ._tracing import TraceData
 from ._snapshots import SnapshotData
 
+_logger = logging.getLogger("veval")
+
+
+class VevalSendError(Exception):
+    """A trace or scenario run could not be delivered to Veval. Raised only when
+    VevalOptions.raise_on_send_failure is set; otherwise the failure is logged as a warning."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
 
 class VevalHttpClient:
-    def __init__(self, api_key: str, endpoint: str):
+    def __init__(self, api_key: str, endpoint: str, raise_on_send_failure: bool = False):
         self._api_key = api_key
         self._endpoint = endpoint.rstrip("/")
+        self._raise_on_send_failure = raise_on_send_failure
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -19,14 +32,10 @@ class VevalHttpClient:
             "Content-Type": "application/json",
         }
 
-    async def send_trace_async(self, payload: Any) -> None:
-        try:
-            import asyncio
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._post, f"{self._endpoint}/v1/traces", payload
-            )
-        except Exception:
-            pass
+    async def send_trace_async(self, payload: Any, raise_on_failure: Optional[bool] = None) -> None:
+        """Never raises unless raise_on_failure (default: the raise_on_send_failure option) is set;
+        a failed send is logged as a warning instead, so tracing can't break the host app."""
+        await self._send_async("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         try:
@@ -50,14 +59,28 @@ class VevalHttpClient:
             return []
 
     async def post_scenario_run_async(self, scenario_name: str, payload: Any) -> None:
+        """Same failure behaviour as send_trace_async."""
+        encoded = quote(scenario_name, safe="")
+        await self._send_async(
+            f"Posting scenario run '{scenario_name}'",
+            f"{self._endpoint}/v1/scenarios/{encoded}/runs", payload, None,
+        )
+
+    async def _send_async(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> None:
+        import asyncio
         try:
-            import asyncio
-            encoded = quote(scenario_name, safe="")
-            await asyncio.get_event_loop().run_in_executor(
-                None, self._post, f"{self._endpoint}/v1/scenarios/{encoded}/runs", payload
-            )
-        except Exception:
-            pass
+            await asyncio.get_event_loop().run_in_executor(None, self._post, url, payload)
+            return
+        except HTTPError as ex:
+            body = ex.read().decode("utf-8", errors="replace")[:500]
+            reason = f": {body}" if body else ""
+            error = VevalSendError(f"Veval: {what} failed with status {ex.code}{reason}", ex.code)
+        except Exception as ex:
+            error = VevalSendError(f"Veval: {what} failed: {ex}")
+
+        _logger.warning(str(error))
+        if self._raise_on_send_failure if raise_on_failure is None else raise_on_failure:
+            raise error
 
     async def judge_async(self, payload: Any) -> dict:
         # Unlike the other calls on this client, judge_async deliberately does not swallow
@@ -106,10 +129,8 @@ class VevalHttpClient:
     def _post(self, url: str, payload: Any) -> None:
         body = json.dumps(payload, default=str).encode("utf-8")
         req = Request(url, data=body, headers=self._headers(), method="POST")
-        try:
-            with urlopen(req, timeout=10):
-                pass
-        except URLError:
+        # urlopen raises HTTPError for any non-2xx status, so a 401 or 429 is a failure here too.
+        with urlopen(req, timeout=10):
             pass
 
     def _get(self, url: str) -> Optional[dict]:

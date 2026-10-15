@@ -9,6 +9,7 @@ class VevalOptions:
         project_id: str = "",
         flush_interval_ms: int = 5000,
         flush_batch_size: int = 50,
+        raise_on_send_failure: bool = False,
     ):
         # The API key also determines the workspace.
         self.api_key = api_key
@@ -27,3 +28,7 @@ class VevalOptions:
         self._endpoint = os.environ.get("VEVAL_INTERNAL_ENDPOINT", "https://api.veval.dev")
         self.flush_interval_ms = flush_interval_ms
         self.flush_batch_size = flush_batch_size
+        # By default a trace or scenario run that can't be delivered (bad API key, quota, network) is
+        # logged as a warning on the "veval" logger and never breaks the host app. Set this in tests
+        # and CI to raise VevalSendError instead.
+        self.raise_on_send_failure = raise_on_send_failure

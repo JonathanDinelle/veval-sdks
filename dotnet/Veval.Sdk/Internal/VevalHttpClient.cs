@@ -9,27 +9,24 @@ internal class VevalHttpClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly string _endpoint;
+    private readonly bool _throwOnSendFailure;
+    private readonly Action<string> _warn;
 
-    public VevalHttpClient(string apiKey, string endpoint)
+    public VevalHttpClient(VevalOptions options)
     {
         _http = new HttpClient();
-        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-        _endpoint = endpoint.TrimEnd('/');
+        _http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", options.ApiKey);
+        _endpoint = options.Endpoint.TrimEnd('/');
+        _throwOnSendFailure = options.ThrowOnSendFailure;
+        _warn = options.Warn;
     }
 
-    public async Task SendTraceAsync(object tracePayload)
-    {
-        try
-        {
-            var json = JsonSerializer.Serialize(tracePayload);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await _http.PostAsync($"{_endpoint}/v1/traces", content);
-        }
-        catch
-        {
-            // SDK must never throw on flush failure
-        }
-    }
+    /// <summary>
+    /// Never throws unless <paramref name="throwOnFailure"/> (default: the ThrowOnSendFailure option) is set;
+    /// a failed send is logged as a warning instead, so tracing can't break the host app.
+    /// </summary>
+    public Task SendTraceAsync(object tracePayload, bool? throwOnFailure = null) =>
+        SendAsync("Sending trace", $"{_endpoint}/v1/traces", tracePayload, throwOnFailure);
 
     public async Task<TraceData?> GetTraceAsync(string traceId)
     {
@@ -62,18 +59,35 @@ internal class VevalHttpClient : IDisposable
         }
     }
 
-    internal async Task PostScenarioRunAsync(string scenarioName, object runPayload)
+    /// <summary>Same failure behaviour as <see cref="SendTraceAsync"/>.</summary>
+    internal Task PostScenarioRunAsync(string scenarioName, object runPayload) =>
+        SendAsync(
+            $"Posting scenario run '{scenarioName}'",
+            $"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/runs",
+            runPayload, null);
+
+    private async Task SendAsync(string what, string url, object payload, bool? throwOnFailure)
     {
+        VevalSendException error;
         try
         {
-            var json = JsonSerializer.Serialize(runPayload);
-            var content = new StringContent(json, Encoding.UTF8, "application/json");
-            await _http.PostAsync($"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/runs", content);
+            var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+            using var response = await _http.PostAsync(url, content);
+            if (response.IsSuccessStatusCode) return;
+
+            var body = await response.Content.ReadAsStringAsync();
+            if (body.Length > 500) body = body[..500];
+            var status = (int)response.StatusCode;
+            var reason = body.Length > 0 ? $": {body}" : "";
+            error = new VevalSendException($"Veval: {what} failed with status {status}{reason}", status);
         }
-        catch
+        catch (Exception ex)
         {
-            // fire-and-forget — never throw
+            error = new VevalSendException($"Veval: {what} failed: {ex.Message}", null, ex);
         }
+
+        _warn(error.Message);
+        if (throwOnFailure ?? _throwOnSendFailure) throw error;
     }
 
     /// <summary>

@@ -21,7 +21,7 @@ T = TypeVar("T")
 class VevalSdk:
     def __init__(self, options: VevalOptions):
         self._options = options
-        self._client = VevalHttpClient(options.api_key, options._endpoint)
+        self._client = VevalHttpClient(options.api_key, options._endpoint, options.raise_on_send_failure)
 
     async def run_async(
         self,
@@ -35,21 +35,23 @@ class VevalSdk:
 
         try:
             result = await callback(ctx)
-            completed_at = datetime.now(timezone.utc)
-            payload = self._build_payload(
-                trace_id, agent_name, ctx, input, result,
-                "success", None, started_at, completed_at,
-            )
-            await self._client.send_trace_async(payload)
-            return result
         except Exception as ex:
             completed_at = datetime.now(timezone.utc)
             payload = self._build_payload(
                 trace_id, agent_name, ctx, input, None,
                 "error", str(ex), started_at, completed_at,
             )
-            await self._client.send_trace_async(payload)
+            # The agent's own exception takes priority over a failed send (which is still logged).
+            await self._client.send_trace_async(payload, raise_on_failure=False)
             raise
+
+        completed_at = datetime.now(timezone.utc)
+        payload = self._build_payload(
+            trace_id, agent_name, ctx, input, result,
+            "success", None, started_at, completed_at,
+        )
+        await self._client.send_trace_async(payload)
+        return result
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         return await self._client.get_trace_async(trace_id)
@@ -249,22 +251,22 @@ class VevalSdk:
         ctx = VevalExecutionContext(trace_id, input)
         started_at = datetime.now(timezone.utc)
 
+        output: Any = None
+        status = "success"
+        error: Optional[str] = None
         try:
-            result = await agent(ctx)
-            completed_at = datetime.now(timezone.utc)
-            payload = self._build_payload(
-                trace_id, agent_name, ctx, input, result,
-                "success", None, started_at, completed_at,
-            )
-            await self._client.send_trace_async(payload)
+            output = await agent(ctx)
         except Exception as ex:
-            completed_at = datetime.now(timezone.utc)
-            payload = self._build_payload(
-                trace_id, agent_name, ctx, input, None,
-                "error", str(ex), started_at, completed_at,
-            )
-            await self._client.send_trace_async(payload)
+            # Not rethrown: assertions see the error through the step statuses.
+            status = "error"
+            error = str(ex)
 
+        completed_at = datetime.now(timezone.utc)
+        payload = self._build_payload(
+            trace_id, agent_name, ctx, input, output,
+            status, error, started_at, completed_at,
+        )
+        await self._client.send_trace_async(payload)
         return ctx
 
     def _build_payload(

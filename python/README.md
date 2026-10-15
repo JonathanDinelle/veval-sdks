@@ -151,6 +151,7 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 | `project_id` | `str` | `""` | Deprecated and ignored; will be removed |
 | `flush_interval_ms` | `int` | `5000` | Batch flush interval |
 | `flush_batch_size` | `int` | `50` | Max traces per flush |
+| `raise_on_send_failure` | `bool` | `False` | Raise `VevalSendError` when a trace or scenario run can't be stored. Off by default: the failure is logged as a warning on the `veval` logger with the HTTP status. Turn it on in tests and CI |
 
 ### `VevalSdk`
 

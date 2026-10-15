@@ -20,7 +20,7 @@ export class VevalSdk {
 
   constructor(options: VevalOptions) {
     this.opts = resolveOptions(options);
-    this.http = new VevalHttpClient(this.opts.apiKey, this.opts.endpoint);
+    this.http = new VevalHttpClient(this.opts.apiKey, this.opts.endpoint, this.opts.throwOnSendFailure);
   }
 
   async runAsync<T>(
@@ -32,15 +32,9 @@ export class VevalSdk {
     const ctx = new VevalExecutionContext(traceId, input ?? null);
     const startedAt = new Date();
 
+    let result: T;
     try {
-      const result = await callback(ctx);
-      const completedAt = new Date();
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input ?? null, result, "success", null, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
-      return result;
+      result = await callback(ctx);
     } catch (err) {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
@@ -48,9 +42,18 @@ export class VevalSdk {
         traceId, agentName, ctx,
         input ?? null, null, "error", error, startedAt, completedAt
       );
-      await this.http.sendTraceAsync(payload);
+      // The agent's own error takes priority over a failed send (which is still logged).
+      await this.http.sendTraceAsync(payload, false);
       throw err;
     }
+
+    const completedAt = new Date();
+    const payload = VevalSdk.buildPayload(
+      traceId, agentName, ctx,
+      input ?? null, result, "success", null, startedAt, completedAt
+    );
+    await this.http.sendTraceAsync(payload);
+    return result;
   }
 
   async getTraceAsync(traceId: string): Promise<TraceData | null> {
@@ -243,24 +246,23 @@ export class VevalSdk {
     const ctx = new VevalExecutionContext(traceId, input);
     const startedAt = new Date();
 
+    let output: unknown = null;
+    let status = "success";
+    let error: string | null = null;
     try {
-      const result = await agent(ctx);
-      const completedAt = new Date();
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input, result, "success", null, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
+      output = await agent(ctx);
     } catch (err) {
-      const completedAt = new Date();
-      const error = err instanceof Error ? err.message : String(err);
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input, null, "error", error, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
+      // Not rethrown: assertions see the error through the step statuses.
+      status = "error";
+      error = err instanceof Error ? err.message : String(err);
     }
 
+    const completedAt = new Date();
+    const payload = VevalSdk.buildPayload(
+      traceId, agentName, ctx,
+      input, output, status, error, startedAt, completedAt
+    );
+    await this.http.sendTraceAsync(payload);
     return ctx;
   }
 

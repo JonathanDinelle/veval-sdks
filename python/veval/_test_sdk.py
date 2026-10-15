@@ -116,7 +116,10 @@ class VevalTestSdk(VevalSdk):
                 started_at, completed_at,
                 extra_meta=extra_meta,
             )
-            await self._client.send_trace_async(payload)
+            # On the error path the agent's own exception takes priority over a failed send.
+            await self._client.send_trace_async(
+                payload, raise_on_failure=False if status == "error" else None
+            )
 
         return output  # type: ignore[return-value]
 

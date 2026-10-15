@@ -23,7 +23,7 @@ public class VevalTestSdk : IVevalSdk
 
     public VevalTestSdk(VevalOptions options)
     {
-        _reportingClient = new VevalHttpClient(options.ApiKey, options.Endpoint);
+        _reportingClient = new VevalHttpClient(options);
     }
 
     public VevalTestSdk WithReplay(TraceData trace)

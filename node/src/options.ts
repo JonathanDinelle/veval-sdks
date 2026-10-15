@@ -5,6 +5,11 @@ export interface VevalOptions {
   projectId?: string;
   flushIntervalMs?: number;
   flushBatchSize?: number;
+  /**
+   * By default a trace or scenario run that can't be delivered (bad API key, quota, network) is logged
+   * with console.warn and never breaks the host app. Set this in tests and CI to throw VevalSendError instead.
+   */
+  throwOnSendFailure?: boolean;
 }
 
 export interface ResolvedVevalOptions {
@@ -17,6 +22,7 @@ export interface ResolvedVevalOptions {
   endpoint: string;
   flushIntervalMs: number;
   flushBatchSize: number;
+  throwOnSendFailure: boolean;
 }
 
 export function resolveOptions(opts: VevalOptions): ResolvedVevalOptions {
@@ -25,5 +31,6 @@ export function resolveOptions(opts: VevalOptions): ResolvedVevalOptions {
     endpoint: process.env.VEVAL_INTERNAL_ENDPOINT ?? "https://api.veval.dev",
     flushIntervalMs: opts.flushIntervalMs ?? 5000,
     flushBatchSize: opts.flushBatchSize ?? 50,
+    throwOnSendFailure: opts.throwOnSendFailure ?? false,
   };
 }

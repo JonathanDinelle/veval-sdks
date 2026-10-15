@@ -34,6 +34,8 @@ const answer = await veval.runAsync("my-agent", async (ctx) => {
 
 Every call to `trackStepAsync` records the step name, input, output, timing, and any metadata you attach.
 
+If a trace can't be stored (wrong API key, quota used up, network down), the SDK logs a `console.warn` with the HTTP status and carries on. Pass `throwOnSendFailure: true` in tests and CI to throw a `VevalSendError` instead.
+
 ## Testing
 
 `VevalTestSdk` replays recorded traces through your agent code with the recorded outputs served for every step, and `TraceAssert` provides assertions (`noErrors`, `maxSteps`, `judge`, `matchesSnapshot`, …) for replays and scenarios. See the guides at [docs.veval.dev](https://docs.veval.dev).

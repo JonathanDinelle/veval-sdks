@@ -86,7 +86,8 @@ export class VevalTestSdk extends VevalSdk {
         traceId, agentName, ctx,
         input ?? null, null, status, error, startedAt, completedAt, extraMeta
       );
-      await this.http.sendTraceAsync(payload);
+      // The agent's own error takes priority over a failed send (which is still logged).
+      await this.http.sendTraceAsync(payload, false);
       throw err;
     }
 
