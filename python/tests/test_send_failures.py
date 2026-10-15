@@ -14,8 +14,16 @@ from veval import ScenarioItem, VevalOptions, VevalSdk, VevalSendError, VevalTes
 
 
 class _Unauthorized(BaseHTTPRequestHandler):
+    # Path prefixes to reject; everything else is accepted.
+    rejected = ("/",)
+
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if not self.path.startswith(self.rejected):
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         body = b'{"error":"invalid api key"}'
         self.send_response(401)
         self.send_header("Content-Type", "application/json")
@@ -42,8 +50,9 @@ def endpoint(url):
 
 
 @contextmanager
-def unauthorized_api():
-    server = HTTPServer(("127.0.0.1", 0), _Unauthorized)
+def unauthorized_api(rejected=("/",)):
+    handler = type("Handler", (_Unauthorized,), {"rejected": rejected})
+    server = HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         with endpoint(f"http://127.0.0.1:{server.server_port}"):
@@ -107,6 +116,7 @@ def test_strict_mode_raises_a_network_failure():
         except VevalSendError as ex:
             assert ex.status is None
     assert len(logged) == 1
+    assert logged[0].split("failed: ", 1)[1].strip(), "the warning names the reason"
 
 
 def test_strict_mode_keeps_the_agents_own_error():
@@ -130,6 +140,50 @@ def test_strict_mode_raises_a_rejected_scenario_run():
         except VevalSendError as ex:
             assert ex.status == 401
     assert any("scenario run 'echo'" in m for m in logged)
+
+
+def test_strict_mode_runs_every_scenario_item_before_raising():
+    calls = []
+
+    async def counting(ctx):
+        calls.append(ctx.input)
+        return "answer"
+
+    with unauthorized_api(), veval_warnings() as logged:
+        sdk = VevalSdk(VevalOptions(api_key="wrong", raise_on_send_failure=True))
+        items = [ScenarioItem(name=n, input=n) for n in ("a", "b", "c")]
+        try:
+            asyncio.run(sdk.run_scenario_async("echo", counting, [], items))
+            raise AssertionError("expected VevalSendError")
+        except VevalSendError:
+            pass
+
+    assert calls == ["a", "b", "c"]
+    assert sum("Sending trace" in m for m in logged) == 3
+    assert any("scenario run 'echo'" in m for m in logged)
+
+
+def test_strict_mode_raises_after_a_posted_scenario_whose_traces_were_lost():
+    with unauthorized_api(rejected=("/v1/traces",)), veval_warnings():
+        sdk = VevalSdk(VevalOptions(api_key="k", raise_on_send_failure=True))
+        try:
+            asyncio.run(sdk.run_scenario_async("echo", answer, [], [ScenarioItem(name="a", input="hi")]))
+            raise AssertionError("expected VevalSendError")
+        except VevalSendError as ex:
+            assert "1 trace(s) from scenario 'echo'" in str(ex)
+
+
+def test_cancelled_test_sdk_run_keeps_its_cancellation():
+    async def cancelled(ctx):
+        raise asyncio.CancelledError()
+
+    with unauthorized_api(), veval_warnings():
+        sdk = VevalTestSdk(VevalOptions(api_key="wrong", raise_on_send_failure=True))
+        try:
+            asyncio.run(sdk.run_async("agent", cancelled))
+            raise AssertionError("expected CancelledError")
+        except asyncio.CancelledError:
+            pass
 
 
 if __name__ == "__main__":

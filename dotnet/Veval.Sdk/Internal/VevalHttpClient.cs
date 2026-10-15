@@ -24,8 +24,9 @@ internal class VevalHttpClient : IDisposable
     /// <summary>
     /// Never throws unless <paramref name="throwOnFailure"/> (default: the ThrowOnSendFailure option) is set;
     /// a failed send is logged as a warning instead, so tracing can't break the host app.
+    /// Returns whether the trace was stored.
     /// </summary>
-    public Task SendTraceAsync(object tracePayload, bool? throwOnFailure = null) =>
+    public Task<bool> SendTraceAsync(object tracePayload, bool? throwOnFailure = null) =>
         SendAsync("Sending trace", $"{_endpoint}/v1/traces", tracePayload, throwOnFailure);
 
     public async Task<TraceData?> GetTraceAsync(string traceId)
@@ -66,14 +67,26 @@ internal class VevalHttpClient : IDisposable
             $"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/runs",
             runPayload, null);
 
-    private async Task SendAsync(string what, string url, object payload, bool? throwOnFailure)
+    /// <summary>
+    /// Scenario item traces are sent without throwing, so one failed send can't abort the remaining items;
+    /// in strict mode the scenario throws once, after its run is posted.
+    /// </summary>
+    internal void ThrowIfUndelivered(string scenarioName, int undelivered)
+    {
+        if (undelivered > 0 && _throwOnSendFailure)
+            throw new VevalSendException(
+                $"Veval: {undelivered} trace(s) from scenario '{scenarioName}' could not be stored; see the warnings above",
+                null);
+    }
+
+    private async Task<bool> SendAsync(string what, string url, object payload, bool? throwOnFailure)
     {
         VevalSendException error;
         try
         {
             var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
             using var response = await _http.PostAsync(url, content);
-            if (response.IsSuccessStatusCode) return;
+            if (response.IsSuccessStatusCode) return true;
 
             var body = await response.Content.ReadAsStringAsync();
             if (body.Length > 500) body = body[..500];
@@ -88,6 +101,7 @@ internal class VevalHttpClient : IDisposable
 
         _warn(error.Message);
         if (throwOnFailure ?? _throwOnSendFailure) throw error;
+        return false;
     }
 
     /// <summary>

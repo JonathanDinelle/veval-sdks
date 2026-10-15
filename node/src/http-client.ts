@@ -33,10 +33,10 @@ export class VevalHttpClient {
 
   /**
    * Never throws unless throwOnFailure (default: the throwOnSendFailure option) is set; a failed send is
-   * logged as a warning instead, so tracing can't break the host app.
+   * logged as a warning instead, so tracing can't break the host app. Resolves to whether the trace was stored.
    */
-  async sendTraceAsync(payload: unknown, throwOnFailure?: boolean): Promise<void> {
-    await this.sendAsync("Sending trace", `${this.endpoint}/v1/traces`, payload, throwOnFailure);
+  async sendTraceAsync(payload: unknown, throwOnFailure?: boolean): Promise<boolean> {
+    return this.sendAsync("Sending trace", `${this.endpoint}/v1/traces`, payload, throwOnFailure);
   }
 
   async getTraceAsync(traceId: string): Promise<TraceData | null> {
@@ -74,23 +74,33 @@ export class VevalHttpClient {
     );
   }
 
-  private async sendAsync(what: string, url: string, payload: unknown, throwOnFailure?: boolean): Promise<void> {
+  /**
+   * Scenario item traces are sent without throwing, so one failed send can't abort the remaining items; in
+   * strict mode the scenario throws once, after its run is posted.
+   */
+  throwIfUndelivered(scenarioName: string, undelivered: number): void {
+    if (undelivered > 0 && this.throwOnSendFailure) {
+      throw new VevalSendError(
+        `Veval: ${undelivered} trace(s) from scenario '${scenarioName}' could not be stored; see the warnings above`
+      );
+    }
+  }
+
+  private async sendAsync(what: string, url: string, payload: unknown, throwOnFailure?: boolean): Promise<boolean> {
     let error: VevalSendError;
     try {
       const res = await fetch(url, { method: "POST", headers: this.headers, body: JSON.stringify(payload) });
-      if (res.ok) return;
+      if (res.ok) return true;
       const body = (await res.text()).slice(0, 500);
       const reason = body ? `: ${body}` : "";
       error = new VevalSendError(`Veval: ${what} failed with status ${res.status}${reason}`, res.status);
     } catch (err) {
-      // fetch reports a network failure as "fetch failed" with the real reason in cause.
-      const cause = (err as { cause?: unknown }).cause;
-      const reason = cause instanceof Error ? cause.message : err instanceof Error ? err.message : String(err);
-      error = new VevalSendError(`Veval: ${what} failed: ${reason}`);
+      error = new VevalSendError(`Veval: ${what} failed: ${networkFailureReason(err)}`);
     }
 
     console.warn(error.message);
     if (throwOnFailure ?? this.throwOnSendFailure) throw error;
+    return false;
   }
 
   /**
@@ -138,4 +148,14 @@ export class VevalHttpClient {
     }
     return (await res.json()) as JudgeResult;
   }
+}
+
+/**
+ * fetch reports a network failure as "fetch failed" with the real reason in cause. On Node 20+ a refused
+ * connection's cause is an AggregateError with an empty message, so fall back to its code (ECONNREFUSED).
+ */
+function networkFailureReason(err: unknown): string {
+  const cause = (err as { cause?: unknown }).cause as { message?: string; code?: string } | undefined;
+  const outer = err instanceof Error ? err.message : String(err);
+  return cause?.message || cause?.code || outer;
 }

@@ -32,15 +32,16 @@ class VevalHttpClient:
             "Content-Type": "application/json",
         }
 
-    async def send_trace_async(self, payload: Any, raise_on_failure: Optional[bool] = None) -> None:
+    async def send_trace_async(self, payload: Any, raise_on_failure: Optional[bool] = None) -> bool:
         """Never raises unless raise_on_failure (default: the raise_on_send_failure option) is set;
-        a failed send is logged as a warning instead, so tracing can't break the host app."""
-        await self._send_async("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
+        a failed send is logged as a warning instead, so tracing can't break the host app.
+        Returns whether the trace was stored."""
+        return await self._send_async("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         try:
             import asyncio
-            data = await asyncio.get_event_loop().run_in_executor(
+            data = await asyncio.get_running_loop().run_in_executor(
                 None, self._get, f"{self._endpoint}/v1/traces/{trace_id}"
             )
             return TraceData.from_dict(data) if data else None
@@ -51,7 +52,7 @@ class VevalHttpClient:
         try:
             import asyncio
             encoded = quote(scenario_name, safe="")
-            data = await asyncio.get_event_loop().run_in_executor(
+            data = await asyncio.get_running_loop().run_in_executor(
                 None, self._get, f"{self._endpoint}/v1/scenarios/{encoded}/items"
             )
             return data.get("items", []) if data else []
@@ -66,13 +67,28 @@ class VevalHttpClient:
             f"{self._endpoint}/v1/scenarios/{encoded}/runs", payload, None,
         )
 
-    async def _send_async(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> None:
+    def raise_if_undelivered(self, scenario_name: str, undelivered: int) -> None:
+        """Scenario item traces are sent without raising, so one failed send can't abort the
+        remaining items; in strict mode the scenario raises once, after its run is posted."""
+        if undelivered and self._raise_on_send_failure:
+            raise VevalSendError(
+                f"Veval: {undelivered} trace(s) from scenario '{scenario_name}' could not be stored; "
+                "see the warnings above"
+            )
+
+    async def _send_async(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> bool:
         import asyncio
         try:
-            await asyncio.get_event_loop().run_in_executor(None, self._post, url, payload)
-            return
+            await asyncio.get_running_loop().run_in_executor(None, self._post, url, payload)
+            return True
         except HTTPError as ex:
-            body = ex.read().decode("utf-8", errors="replace")[:500]
+            try:
+                body = ex.read().decode("utf-8", errors="replace")[:500]
+            except Exception:
+                # The status alone is enough; a body that can't be read mustn't escape the handler.
+                body = ""
+            finally:
+                ex.close()
             reason = f": {body}" if body else ""
             error = VevalSendError(f"Veval: {what} failed with status {ex.code}{reason}", ex.code)
         except Exception as ex:
@@ -81,13 +97,14 @@ class VevalHttpClient:
         _logger.warning(str(error))
         if self._raise_on_send_failure if raise_on_failure is None else raise_on_failure:
             raise error
+        return False
 
     async def judge_async(self, payload: Any) -> dict:
         # Unlike the other calls on this client, judge_async deliberately does not swallow
         # failures — a network/API error here must surface as an assertion failure, not a
         # silent pass. Callers are expected to catch.
         import asyncio
-        return await asyncio.get_event_loop().run_in_executor(
+        return await asyncio.get_running_loop().run_in_executor(
             None, self._post_json, f"{self._endpoint}/v1/judge", payload
         )
 
@@ -95,7 +112,7 @@ class VevalHttpClient:
         # Raises on failure — a baseline that silently didn't save would make every later
         # comparison fail, or compare against a stale one.
         import asyncio
-        data = await asyncio.get_event_loop().run_in_executor(
+        data = await asyncio.get_running_loop().run_in_executor(
             None, self._post_json, f"{self._endpoint}/v1/snapshots", payload
         )
         return SnapshotData.from_dict(data)
@@ -105,7 +122,7 @@ class VevalHttpClient:
         # error can never look like "nothing to compare against".
         import asyncio
         encoded = quote(name, safe="")
-        data = await asyncio.get_event_loop().run_in_executor(
+        data = await asyncio.get_running_loop().run_in_executor(
             None, self._get_or_none_on_404, f"{self._endpoint}/v1/snapshots/{encoded}"
         )
         return SnapshotData.from_dict(data) if data is not None else None

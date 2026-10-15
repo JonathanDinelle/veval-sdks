@@ -165,6 +165,7 @@ export class VevalSdk {
   ): Promise<ScenarioRunResult> {
     const rawItems = items ?? (await this.http.getScenarioItemsAsync(scenarioName)) as ScenarioItem[];
     const results: ItemRunResult[] = [];
+    let undelivered = 0;
 
     for (const item of rawItems) {
       const effectiveAssertions = [...scenarioAssertions, ...(item.assertions ?? [])];
@@ -192,11 +193,12 @@ export class VevalSdk {
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
             );
-            await this.http.sendTraceAsync(payload);
+            if (!(await this.http.sendTraceAsync(payload, false))) undelivered++;
           }
         }
       } else if (item.input !== undefined) {
-        const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input);
+        const { ctx, delivered } = await this._runAndCaptureContext(scenarioName, agent, item.input);
+        if (!delivered) undelivered++;
         for (const assertion of effectiveAssertions) {
           const failure = await assertion.evaluate(ctx);
           if (failure) {
@@ -233,15 +235,17 @@ export class VevalSdk {
         judgments: r.context?.judgments ?? [],
       })),
     });
+    this.http.throwIfUndelivered(scenarioName, undelivered);
 
     return scenarioResult;
   }
 
+  /** Runs one synthetic scenario item; resolves to its context and whether its trace was stored. */
   private async _runAndCaptureContext<T>(
     agentName: string,
     agent: (ctx: VevalExecutionContext) => Promise<T>,
     input: unknown
-  ): Promise<VevalExecutionContext> {
+  ): Promise<{ ctx: VevalExecutionContext; delivered: boolean }> {
     const traceId = `tr_${crypto.randomUUID().replace(/-/g, "")}`;
     const ctx = new VevalExecutionContext(traceId, input);
     const startedAt = new Date();
@@ -262,8 +266,8 @@ export class VevalSdk {
       traceId, agentName, ctx,
       input, output, status, error, startedAt, completedAt
     );
-    await this.http.sendTraceAsync(payload);
-    return ctx;
+    const delivered = await this.http.sendTraceAsync(payload, false);
+    return { ctx, delivered };
   }
 
   static buildPayload(

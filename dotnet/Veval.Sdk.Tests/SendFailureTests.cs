@@ -14,6 +14,9 @@ public class SendFailureTests : IDisposable
     private readonly TcpListener _unauthorizedApi = new(IPAddress.Loopback, 0);
     private readonly List<string> _warnings = new();
 
+    // Path prefixes the fake API rejects with 401; everything else gets 200.
+    private string[] _rejected = ["/"];
+
     public SendFailureTests()
     {
         _unauthorizedApi.Start();
@@ -38,10 +41,12 @@ public class SendFailureTests : IDisposable
             {
                 using var client = await _unauthorizedApi.AcceptTcpClientAsync();
                 var stream = client.GetStream();
-                await ReadRequestAsync(stream);
+                var path = await ReadRequestAsync(stream);
                 const string body = "{\"error\":\"invalid api key\"}";
-                var response = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n" +
-                               $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}";
+                var response = _rejected.Any(path.StartsWith)
+                    ? "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n" +
+                      $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"
+                    : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 await stream.WriteAsync(Encoding.ASCII.GetBytes(response));
             }
         }
@@ -51,7 +56,8 @@ public class SendFailureTests : IDisposable
         }
     }
 
-    private static async Task ReadRequestAsync(NetworkStream stream)
+    /// <summary>Reads one request and returns its path.</summary>
+    private static async Task<string> ReadRequestAsync(NetworkStream stream)
     {
         // Read the headers, then exactly Content-Length bytes of body, so the client sees a clean response.
         var buffer = new List<byte>();
@@ -68,6 +74,8 @@ public class SendFailureTests : IDisposable
             if (read == 0) break;
             remaining -= read;
         }
+
+        return headers.Split(' ').ElementAtOrDefault(1) ?? "/";
     }
 
     private static bool EndsWithBlankLine(List<byte> b) =>
@@ -119,6 +127,17 @@ public class SendFailureTests : IDisposable
     }
 
     [Fact]
+    public async Task StrictMode_TestSdkKeepsTheAgentsOwnError_AndStillSendsTheErrorTrace()
+    {
+        var sdk = new VevalTestSdk(Options(UnauthorizedEndpoint, strict: true));
+
+        var act = () => sdk.RunAsync<string>("agent", _ => throw new InvalidOperationException("agent crashed"));
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("agent crashed");
+        _warnings.Should().ContainSingle().Which.Should().Contain("401");
+    }
+
+    [Fact]
     public async Task StrictMode_ThrowsARejectedScenarioRun()
     {
         var sdk = new VevalTestSdk(Options(UnauthorizedEndpoint, strict: true));
@@ -128,5 +147,32 @@ public class SendFailureTests : IDisposable
 
         (await act.Should().ThrowAsync<VevalSendException>()).Which.StatusCode.Should().Be(401);
         _warnings.Should().Contain(w => w.Contains("scenario run 'echo'"));
+    }
+
+    [Fact]
+    public async Task StrictMode_RunsEveryScenarioItemBeforeThrowing()
+    {
+        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: true));
+        var calls = new List<object?>();
+
+        var act = () => sdk.RunScenarioAsync("echo", ctx => { calls.Add(ctx.Input); return Task.FromResult("answer"); }, [],
+            new[] { "a", "b", "c" }.Select(n => new ScenarioItem { Name = n, Input = n }).ToArray());
+
+        await act.Should().ThrowAsync<VevalSendException>();
+        calls.Should().Equal("a", "b", "c");
+        _warnings.Count(w => w.Contains("Sending trace")).Should().Be(3);
+        _warnings.Should().Contain(w => w.Contains("scenario run 'echo'"));
+    }
+
+    [Fact]
+    public async Task StrictMode_ThrowsAfterAPostedScenarioWhoseTracesWereLost()
+    {
+        _rejected = ["/v1/traces"];
+        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: true));
+
+        var act = () => sdk.RunScenarioAsync("echo", _ => Task.FromResult("answer"), [],
+            [new ScenarioItem { Name = "a", Input = "hi" }]);
+
+        await act.Should().ThrowAsync<VevalSendException>().WithMessage("*1 trace(s) from scenario 'echo'*");
     }
 }

@@ -184,6 +184,7 @@ class VevalSdk:
             resolved_items = items
 
         scenario_result = ScenarioRunResult()
+        undelivered = 0
 
         for item in resolved_items:
             effective_assertions = scenario_assertions + list(item.assertions)
@@ -210,10 +211,13 @@ class VevalSdk:
                             replay_result.started_at, replay_result.completed_at,
                             extra_meta={"replay": True, "source_trace_id": item.trace_id},
                         )
-                        await self._client.send_trace_async(payload)
+                        if not await self._client.send_trace_async(payload, raise_on_failure=False):
+                            undelivered += 1
 
             elif item.input is not None:
-                ctx = await self._run_and_capture_context(scenario_name, agent, item.input)
+                ctx, delivered = await self._run_and_capture_context(scenario_name, agent, item.input)
+                if not delivered:
+                    undelivered += 1
                 for assertion in effective_assertions:
                     failure = await assertion.evaluate_async(ctx)
                     if failure:
@@ -238,6 +242,7 @@ class VevalSdk:
                 for r in scenario_result.results
             ],
         })
+        self._client.raise_if_undelivered(scenario_name, undelivered)
 
         return scenario_result
 
@@ -246,7 +251,8 @@ class VevalSdk:
         agent_name: str,
         agent: Callable[[VevalExecutionContext], Awaitable[T]],
         input: Any,
-    ) -> VevalExecutionContext:
+    ) -> tuple[VevalExecutionContext, bool]:
+        """Runs one synthetic scenario item; returns its context and whether its trace was stored."""
         trace_id = f"tr_{uuid.uuid4().hex}"
         ctx = VevalExecutionContext(trace_id, input)
         started_at = datetime.now(timezone.utc)
@@ -266,8 +272,8 @@ class VevalSdk:
             trace_id, agent_name, ctx, input, output,
             status, error, started_at, completed_at,
         )
-        await self._client.send_trace_async(payload)
-        return ctx
+        delivered = await self._client.send_trace_async(payload, raise_on_failure=False)
+        return ctx, delivered
 
     def _build_payload(
         self,

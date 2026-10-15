@@ -66,26 +66,30 @@ public class VevalTestSdk : IVevalSdk
             ctx.LoadMockOutputs(_replayTrace);
 
         var startedAt = DateTime.UtcNow;
-        object? output = null;
-        string status = "success";
-        string? error = null;
-
+        T output;
         try
         {
             output = await callback(ctx);
-            _lastStatus = "success";
-            _lastError = null;
         }
         catch (Exception ex)
         {
-            status = "error";
-            error = ex.Message;
             _lastStatus = "error";
             _lastError = ex.Message;
+            // The agent's own exception takes priority over a failed send (which is still logged).
+            await SendRunTraceAsync(ctx, agentName, input, null, "error", ex.Message, startedAt, throwOnFailure: false);
             throw;
         }
 
-        var completedAt = DateTime.UtcNow;
+        _lastStatus = "success";
+        _lastError = null;
+        await SendRunTraceAsync(ctx, agentName, input, output, "success", null, startedAt);
+        return output;
+    }
+
+    private Task<bool> SendRunTraceAsync(
+        VevalExecutionContext ctx, string agentName, object? input, object? output,
+        string status, string? error, DateTime startedAt, bool? throwOnFailure = null)
+    {
         var extraMeta = new Dictionary<string, object> { ["replay"] = true };
         if (_replayTrace != null)
             extraMeta["source_trace_id"] = _replayTrace.TraceId;
@@ -93,11 +97,9 @@ public class VevalTestSdk : IVevalSdk
         var payload = VevalSdk.BuildPayload(
             ctx.TraceId, agentName, ctx,
             input, output, status, error,
-            startedAt, completedAt,
+            startedAt, DateTime.UtcNow,
             extraMeta);
-        await _reportingClient.SendTraceAsync(payload);
-
-        return (T)output!;
+        return _reportingClient.SendTraceAsync(payload, throwOnFailure);
     }
 
     public string LastStatus => _lastStatus;
@@ -184,6 +186,7 @@ public class VevalTestSdk : IVevalSdk
         ScenarioItem[]? items = null)
     {
         var scenarioResult = new ScenarioRunResult();
+        var undelivered = 0;
         var resolvedItems = items ?? Array.Empty<ScenarioItem>();
 
         foreach (var item in resolvedItems)
@@ -219,7 +222,7 @@ public class VevalTestSdk : IVevalSdk
                             ["replay"] = true,
                             ["source_trace_id"] = item.TraceId,
                         });
-                    await _reportingClient.SendTraceAsync(payload);
+                    if (!await _reportingClient.SendTraceAsync(payload, throwOnFailure: false)) undelivered++;
                 }
             }
             else if (item.Input != null)
@@ -256,6 +259,7 @@ public class VevalTestSdk : IVevalSdk
                 judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
             }),
         });
+        _reportingClient.ThrowIfUndelivered(scenarioName, undelivered);
 
         return scenarioResult;
     }

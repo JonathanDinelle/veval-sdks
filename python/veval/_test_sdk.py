@@ -91,37 +91,42 @@ class VevalTestSdk(VevalSdk):
             ctx.load_mock_outputs(self._replay_trace)
 
         started_at = datetime.now(timezone.utc)
-        output: Any = None
-        status = "success"
-        error: Optional[str] = None
-
         try:
             output = await callback(ctx)
-            self._last_status = "success"
-            self._last_error = None
         except Exception as ex:
-            status = "error"
-            error = str(ex)
             self._last_status = "error"
-            self._last_error = error
+            self._last_error = str(ex)
+            # The agent's own exception takes priority over a failed send (which is still logged).
+            await self._send_run_trace(ctx, agent_name, input, None, "error", str(ex), started_at,
+                                       raise_on_failure=False)
             raise
-        finally:
-            completed_at = datetime.now(timezone.utc)
-            extra_meta: dict[str, Any] = {"replay": True}
-            if self._replay_trace:
-                extra_meta["source_trace_id"] = self._replay_trace.trace_id
-            payload = self._build_payload(
-                ctx.trace_id, agent_name, ctx,
-                input, output, status, error,
-                started_at, completed_at,
-                extra_meta=extra_meta,
-            )
-            # On the error path the agent's own exception takes priority over a failed send.
-            await self._client.send_trace_async(
-                payload, raise_on_failure=False if status == "error" else None
-            )
 
-        return output  # type: ignore[return-value]
+        self._last_status = "success"
+        self._last_error = None
+        await self._send_run_trace(ctx, agent_name, input, output, "success", None, started_at)
+        return output
+
+    async def _send_run_trace(
+        self,
+        ctx: VevalExecutionContext,
+        agent_name: str,
+        input: Any,
+        output: Any,
+        status: str,
+        error: Optional[str],
+        started_at: datetime,
+        raise_on_failure: Optional[bool] = None,
+    ) -> None:
+        extra_meta: dict[str, Any] = {"replay": True}
+        if self._replay_trace:
+            extra_meta["source_trace_id"] = self._replay_trace.trace_id
+        payload = self._build_payload(
+            ctx.trace_id, agent_name, ctx,
+            input, output, status, error,
+            started_at, datetime.now(timezone.utc),
+            extra_meta=extra_meta,
+        )
+        await self._client.send_trace_async(payload, raise_on_failure=raise_on_failure)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         if self._replay_trace and self._replay_trace.trace_id == trace_id:
@@ -154,6 +159,7 @@ class VevalTestSdk(VevalSdk):
     ) -> ScenarioRunResult:
         resolved_items = items or []
         scenario_result = ScenarioRunResult()
+        undelivered = 0
 
         for item in resolved_items:
             effective_assertions = scenario_assertions + list(item.assertions)
@@ -182,7 +188,8 @@ class VevalTestSdk(VevalSdk):
                             replay_result.started_at, replay_result.completed_at,
                             extra_meta={"replay": True, "source_trace_id": item.trace_id},
                         )
-                        await self._client.send_trace_async(payload)
+                        if not await self._client.send_trace_async(payload, raise_on_failure=False):
+                            undelivered += 1
 
             elif item.input is not None:
                 ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", item.input)
@@ -215,5 +222,6 @@ class VevalTestSdk(VevalSdk):
                 for r in scenario_result.results
             ],
         })
+        self._client.raise_if_undelivered(scenario_name, undelivered)
 
         return scenario_result

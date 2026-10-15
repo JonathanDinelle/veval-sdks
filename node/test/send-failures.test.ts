@@ -18,10 +18,15 @@ async function withEndpoint<T>(url: string, body: () => Promise<T>): Promise<T> 
   }
 }
 
-async function withUnauthorizedApi<T>(body: () => Promise<T>): Promise<T> {
+// Rejects requests whose path starts with one of `rejected`; accepts everything else.
+async function withUnauthorizedApi<T>(body: () => Promise<T>, rejected = ["/"]): Promise<T> {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
+      if (!rejected.some((prefix) => req.url!.startsWith(prefix))) {
+        res.writeHead(200).end();
+        return;
+      }
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end('{"error":"invalid api key"}');
     });
@@ -68,11 +73,18 @@ test("strict mode throws a rejected trace", async () => {
 });
 
 test("strict mode throws a network failure", async () => {
-  const logged = await capturingWarnings(() => withEndpoint("http://127.0.0.1:1", async () => {
+  // A port that was just free; not port 1, which fetch rejects as a "bad port" before connecting.
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const closedPort = (probe.address() as AddressInfo).port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const logged = await capturingWarnings(() => withEndpoint(`http://127.0.0.1:${closedPort}`, async () => {
     const sdk = new VevalSdk({ apiKey: "k", throwOnSendFailure: true });
     await assert.rejects(sdk.runAsync("agent", answer), (err) => err instanceof VevalSendError && err.status === null);
   }));
   assert.equal(logged.length, 1);
+  assert.match(logged[0], /failed: \S/, "the warning names the reason");
 });
 
 test("strict mode keeps the agent's own error", async () => {
@@ -94,4 +106,29 @@ test("strict mode throws a rejected scenario run", async () => {
     );
   }));
   assert.ok(logged.some((m) => m.includes("scenario run 'echo'")));
+});
+
+test("strict mode runs every scenario item before throwing", async () => {
+  const calls: unknown[] = [];
+  const counting = async (ctx: VevalExecutionContext) => { calls.push(ctx.input); return "answer"; };
+
+  const logged = await capturingWarnings(() => withUnauthorizedApi(async () => {
+    const sdk = new VevalSdk({ apiKey: "wrong", throwOnSendFailure: true });
+    const items = ["a", "b", "c"].map((n) => ({ name: n, input: n, assertions: [] }));
+    await assert.rejects(sdk.runScenarioAsync("echo", counting, [], items), VevalSendError);
+  }));
+
+  assert.deepEqual(calls, ["a", "b", "c"]);
+  assert.equal(logged.filter((m) => m.includes("Sending trace")).length, 3);
+  assert.ok(logged.some((m) => m.includes("scenario run 'echo'")));
+});
+
+test("strict mode throws after a posted scenario whose traces were lost", async () => {
+  await capturingWarnings(() => withUnauthorizedApi(async () => {
+    const sdk = new VevalSdk({ apiKey: "k", throwOnSendFailure: true });
+    await assert.rejects(
+      sdk.runScenarioAsync("echo", answer, [], [{ name: "a", input: "hi", assertions: [] }]),
+      /1 trace\(s\) from scenario 'echo'/
+    );
+  }, ["/v1/traces"]));
 });

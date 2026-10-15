@@ -128,6 +128,7 @@ export class VevalTestSdk extends VevalSdk {
   ): Promise<ScenarioRunResult> {
     const resolvedItems = items ?? [];
     const results: ItemRunResult[] = [];
+    let undelivered = 0;
 
     for (const item of resolvedItems) {
       const effectiveAssertions = [...scenarioAssertions, ...(item.assertions ?? [])];
@@ -157,7 +158,7 @@ export class VevalTestSdk extends VevalSdk {
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
             );
-            await this.http.sendTraceAsync(payload);
+            if (!(await this.http.sendTraceAsync(payload, false))) undelivered++;
           }
         }
       } else if (item.input !== undefined) {
@@ -205,6 +206,7 @@ export class VevalTestSdk extends VevalSdk {
         judgments: r.context?.judgments ?? [],
       })),
     });
+    this.http.throwIfUndelivered(scenarioName, undelivered);
 
     return scenarioResult;
   }
