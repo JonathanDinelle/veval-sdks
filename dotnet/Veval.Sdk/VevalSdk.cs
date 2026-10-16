@@ -154,7 +154,7 @@ public class VevalSdk : IVevalSdk
                 var trace = await GetTraceAsync(item.TraceId);
                 if (trace == null)
                 {
-                    itemResult.Failures.Add($"trace '{item.TraceId}' not found");
+                    itemResult.Failures.Add(MissingTraceMessage(item.TraceId));
                 }
                 else
                 {
@@ -284,6 +284,14 @@ public class VevalSdk : IVevalSdk
             }),
         };
     }
+
+    /// <summary>
+    /// Failure for a trace-backed scenario item whose trace the API returned 404 for. The usual cause is
+    /// retention deleting a trace that is only referenced from test code.
+    /// </summary>
+    internal static string MissingTraceMessage(string traceId) =>
+        $"trace '{traceId}' not found — it may have expired under your plan's retention, or the ID or workspace is wrong. " +
+        "Pin it on the trace page in the dashboard to keep it.";
 
     internal static List<Step> FlattenSteps(IReadOnlyList<Step> steps)
     {

@@ -11,7 +11,7 @@ from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
-from ._sdk import VevalSdk, _flatten_steps
+from ._sdk import VevalSdk, _flatten_steps, _missing_trace_message
 
 T = TypeVar("T")
 
@@ -169,9 +169,7 @@ class VevalTestSdk(VevalSdk):
             if item.trace_id:
                 trace = await self.get_trace_async(item.trace_id)
                 if trace is None:
-                    item_result.failures.append(
-                        f"trace '{item.trace_id}' not found — call with_replay(trace) before run_scenario_async"
-                    )
+                    item_result.failures.append(_missing_trace_message(item.trace_id))
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,

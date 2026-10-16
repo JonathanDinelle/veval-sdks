@@ -194,7 +194,7 @@ class VevalSdk:
             if item.trace_id:
                 trace = await self.get_trace_async(item.trace_id)
                 if trace is None:
-                    item_result.failures.append(f"trace '{item.trace_id}' not found")
+                    item_result.failures.append(_missing_trace_message(item.trace_id))
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
@@ -314,6 +314,15 @@ class VevalSdk:
                 for s in steps
             ],
         }
+
+
+def _missing_trace_message(trace_id: str) -> str:
+    """Failure for a trace-backed scenario item whose trace the API returned 404 for. The usual cause is
+    retention deleting a trace that is only referenced from test code."""
+    return (
+        f"trace '{trace_id}' not found — it may have expired under your plan's retention, or the ID or workspace is wrong. "
+        "Pin it on the trace page in the dashboard to keep it."
+    )
 
 
 def _flatten_steps(steps: list[Step]) -> list[Step]:

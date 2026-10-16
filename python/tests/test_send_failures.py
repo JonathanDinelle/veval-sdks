@@ -213,14 +213,19 @@ def test_traces_that_cant_be_loaded_raise_instead_of_looking_missing():
 
 
 def test_a_missing_trace_fails_only_its_item():
-    with unauthorized_api(rejected=(), missing=("/v1/traces/",)), veval_warnings() as logged:
-        sdk = VevalSdk(VevalOptions(api_key="k", raise_on_send_failure=True))
-        items = [ScenarioItem(name="saved", trace_id="tr_gone"), ScenarioItem(name="live", input="hi")]
-        result = asyncio.run(sdk.run_scenario_async("echo", answer, [], items))
+    # VevalTestSdk knows only the with_replay trace, so any other ID is missing.
+    for make in (VevalSdk, VevalTestSdk):
+        with unauthorized_api(rejected=(), missing=("/v1/traces/",)), veval_warnings() as logged:
+            sdk = make(VevalOptions(api_key="k", raise_on_send_failure=True))
+            items = [ScenarioItem(name="saved", trace_id="tr_gone"), ScenarioItem(name="live", input="hi")]
+            result = asyncio.run(sdk.run_scenario_async("echo", answer, [], items))
 
-    assert result.results[0].failures == ["trace 'tr_gone' not found"]
-    assert result.results[1].passed
-    assert logged == []
+        [failure] = result.results[0].failures
+        assert failure.startswith("trace 'tr_gone' not found")
+        assert "retention" in failure
+        assert "with_replay" not in failure
+        assert result.results[1].passed
+        assert logged == []
 
 
 def test_an_unreachable_api_raises_without_a_status_when_loading_a_trace():
