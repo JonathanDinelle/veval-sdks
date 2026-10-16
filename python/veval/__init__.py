@@ -19,6 +19,7 @@ from ._snapshots import (
 from ._assertions import ITraceAssertion, TraceAssert
 from ._scenarios import ScenarioItem, ItemRunResult, ScenarioRunResult
 from ._sdk import VevalSdk
+from ._http_client import VevalRequestError, VevalSendError
 from ._test_sdk import VevalTestSdk
 
 __all__ = [
@@ -43,5 +44,7 @@ __all__ = [
     "ItemRunResult",
     "ScenarioRunResult",
     "VevalSdk",
+    "VevalRequestError",
+    "VevalSendError",
     "VevalTestSdk",
 ]

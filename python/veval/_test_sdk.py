@@ -10,6 +10,7 @@ from ._tracing import TraceData, SnapshotData, SnapshotDiff, compare_snapshots, 
 from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
+from ._scenario_report import ScenarioReport
 from ._sdk import VevalSdk, _flatten_steps
 
 T = TypeVar("T")
@@ -91,34 +92,42 @@ class VevalTestSdk(VevalSdk):
             ctx.load_mock_outputs(self._replay_trace)
 
         started_at = datetime.now(timezone.utc)
-        output: Any = None
-        status = "success"
-        error: Optional[str] = None
-
         try:
             output = await callback(ctx)
-            self._last_status = "success"
-            self._last_error = None
         except Exception as ex:
-            status = "error"
-            error = str(ex)
             self._last_status = "error"
-            self._last_error = error
+            self._last_error = str(ex)
+            # The agent's own exception takes priority over a failed send (which is still logged).
+            await self._send_run_trace(ctx, agent_name, input, None, "error", str(ex), started_at,
+                                       raise_on_failure=False)
             raise
-        finally:
-            completed_at = datetime.now(timezone.utc)
-            extra_meta: dict[str, Any] = {"replay": True}
-            if self._replay_trace:
-                extra_meta["source_trace_id"] = self._replay_trace.trace_id
-            payload = self._build_payload(
-                ctx.trace_id, agent_name, ctx,
-                input, output, status, error,
-                started_at, completed_at,
-                extra_meta=extra_meta,
-            )
-            await self._client.send_trace_async(payload)
 
-        return output  # type: ignore[return-value]
+        self._last_status = "success"
+        self._last_error = None
+        await self._send_run_trace(ctx, agent_name, input, output, "success", None, started_at)
+        return output
+
+    async def _send_run_trace(
+        self,
+        ctx: VevalExecutionContext,
+        agent_name: str,
+        input: Any,
+        output: Any,
+        status: str,
+        error: Optional[str],
+        started_at: datetime,
+        raise_on_failure: Optional[bool] = None,
+    ) -> None:
+        extra_meta: dict[str, Any] = {"replay": True}
+        if self._replay_trace:
+            extra_meta["source_trace_id"] = self._replay_trace.trace_id
+        payload = self._build_payload(
+            ctx.trace_id, agent_name, ctx,
+            input, output, status, error,
+            started_at, datetime.now(timezone.utc),
+            extra_meta=extra_meta,
+        )
+        await self._client.send_trace_async(payload, raise_on_failure=raise_on_failure)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         if self._replay_trace and self._replay_trace.trace_id == trace_id:
@@ -151,6 +160,7 @@ class VevalTestSdk(VevalSdk):
     ) -> ScenarioRunResult:
         resolved_items = items or []
         scenario_result = ScenarioRunResult()
+        report = ScenarioReport(self._client, scenario_name)
 
         for item in resolved_items:
             effective_assertions = scenario_assertions + list(item.assertions)
@@ -179,7 +189,7 @@ class VevalTestSdk(VevalSdk):
                             replay_result.started_at, replay_result.completed_at,
                             extra_meta={"replay": True, "source_trace_id": item.trace_id},
                         )
-                        await self._client.send_trace_async(payload)
+                        await report.send_trace_async(payload)
 
             elif item.input is not None:
                 ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", item.input)
@@ -198,19 +208,5 @@ class VevalTestSdk(VevalSdk):
 
             scenario_result.results.append(item_result)
 
-        await self._client.post_scenario_run_async(scenario_name, {
-            "passed": scenario_result.passed,
-            "pass_count": scenario_result.pass_count,
-            "fail_count": scenario_result.fail_count,
-            "results": [
-                {
-                    "name": r.item.name or r.item.trace_id or "item",
-                    "passed": r.passed,
-                    "failures": r.failures,
-                    "judgments": r.context.judgments if r.context else [],
-                }
-                for r in scenario_result.results
-            ],
-        })
-
+        await report.complete_async(scenario_result, unnamed_item="item")
         return scenario_result

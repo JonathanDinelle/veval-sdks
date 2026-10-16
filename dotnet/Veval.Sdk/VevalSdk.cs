@@ -11,7 +11,7 @@ public class VevalSdk : IVevalSdk
     public VevalSdk(VevalOptions options)
     {
         _options = options;
-        _client = new VevalHttpClient(options.ApiKey, options.Endpoint);
+        _client = new VevalHttpClient(options);
     }
 
     public async Task<T> RunAsync<T>(string agentName, Func<VevalExecutionContext, Task<T>> callback, object? input = null)
@@ -20,23 +20,24 @@ public class VevalSdk : IVevalSdk
         var ctx = new VevalExecutionContext(traceId, input);
         var startedAt = DateTime.UtcNow;
 
+        T result;
         try
         {
-            var result = await callback(ctx);
-
-            var completedAt = DateTime.UtcNow;
-            var payload = BuildPayload(traceId, agentName, ctx, input, result, "success", null, startedAt, completedAt);
-            await _client.SendTraceAsync(payload);
-
-            return result;
+            result = await callback(ctx);
         }
         catch (Exception ex)
         {
-            var completedAt = DateTime.UtcNow;
-            var payload = BuildPayload(traceId, agentName, ctx, input, null, "error", ex.Message, startedAt, completedAt);
-            await _client.SendTraceAsync(payload);
+            var failedAt = DateTime.UtcNow;
+            var errorPayload = BuildPayload(traceId, agentName, ctx, input, null, "error", ex.Message, startedAt, failedAt);
+            // The agent's own exception takes priority over a failed send (which is still logged).
+            await _client.SendTraceAsync(errorPayload, throwOnFailure: false);
             throw;
         }
+
+        var completedAt = DateTime.UtcNow;
+        var payload = BuildPayload(traceId, agentName, ctx, input, result, "success", null, startedAt, completedAt);
+        await _client.SendTraceAsync(payload);
+        return result;
     }
 
     public async Task<TraceData?> GetTraceAsync(string traceId)
@@ -140,6 +141,7 @@ public class VevalSdk : IVevalSdk
             .ToArray();
 
         var scenarioResult = new ScenarioRunResult();
+        var report = new ScenarioReport(_client, scenarioName);
 
         foreach (var item in resolvedItems)
         {
@@ -176,13 +178,13 @@ public class VevalSdk : IVevalSdk
                             ["replay"] = true,
                             ["source_trace_id"] = item.TraceId,
                         });
-                    await _client.SendTraceAsync(replayPayload);
+                    await report.SendTraceAsync(replayPayload);
                 }
             }
             else if (item.Input != null)
             {
                 // Synthetic item: live run with real LLM
-                var ctx = await RunAndCaptureContextAsync(scenarioName, agent, item.Input);
+                var ctx = await RunAndCaptureContextAsync(scenarioName, agent, item.Input, report);
                 foreach (var assertion in effectiveAssertions)
                 {
                     var failure = await assertion.EvaluateAsync(ctx);
@@ -198,48 +200,39 @@ public class VevalSdk : IVevalSdk
             scenarioResult.Results.Add(itemResult);
         }
 
-        // Post results to API for trend tracking (fire-and-forget)
-        await _client.PostScenarioRunAsync(scenarioName, new
-        {
-            passed = scenarioResult.Passed,
-            pass_count = scenarioResult.PassCount,
-            fail_count = scenarioResult.FailCount,
-            results = scenarioResult.Results.Select(r => new
-            {
-                name = r.Item.Name ?? r.Item.TraceId ?? "synthetic",
-                passed = r.Passed,
-                failures = r.Failures,
-                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
-            }),
-        });
+        await report.CompleteAsync(scenarioResult, unnamedItem: "synthetic");
 
         return scenarioResult;
     }
 
+    /// <summary>Runs one synthetic scenario item, sends its trace through the report, and returns its context.</summary>
     private async Task<VevalExecutionContext> RunAndCaptureContextAsync<T>(
         string agentName,
         Func<VevalExecutionContext, Task<T>> agent,
-        object? input)
+        object? input,
+        ScenarioReport report)
     {
         var traceId = $"tr_{Guid.NewGuid():N}";
         var ctx = new VevalExecutionContext(traceId, input);
         var startedAt = DateTime.UtcNow;
 
+        object? output = null;
+        string status = "success";
+        string? error = null;
         try
         {
-            var result = await agent(ctx);
-            var completedAt = DateTime.UtcNow;
-            var payload = BuildPayload(traceId, agentName, ctx, input, result, "success", null, startedAt, completedAt);
-            await _client.SendTraceAsync(payload);
+            output = await agent(ctx);
         }
         catch (Exception ex)
         {
-            var completedAt = DateTime.UtcNow;
-            var payload = BuildPayload(traceId, agentName, ctx, input, null, "error", ex.Message, startedAt, completedAt);
-            await _client.SendTraceAsync(payload);
             // intentionally don't rethrow — let assertions detect the error via step statuses
+            status = "error";
+            error = ex.Message;
         }
 
+        var completedAt = DateTime.UtcNow;
+        var payload = BuildPayload(traceId, agentName, ctx, input, output, status, error, startedAt, completedAt);
+        await report.SendTraceAsync(payload);
         return ctx;
     }
 

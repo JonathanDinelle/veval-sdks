@@ -45,6 +45,7 @@ The main entry point. Create one instance and reuse it across your application.
 var veval = new VevalSdk(new VevalOptions
 {
     ApiKey = "vk_...",   // Required. Your Veval API key — it also determines the workspace.
+    ThrowOnSendFailure = false,   // Optional. Set true in tests/CI to throw when a trace can't be stored.
 });
 ```
 
@@ -65,7 +66,8 @@ var result = await veval.RunAsync("agent-name", async ctx =>
 - Records start/end time, duration, and status
 - On success: sends the trace with `status: "success"`
 - On exception: sends the trace with `status: "error"` and the error message, then re-throws
-- Never swallows your exceptions, and never throws on network failures to Veval
+- Never swallows your exceptions
+- If Veval can't store the trace (wrong API key, quota used up, network down), writes a warning with the HTTP status to standard error and carries on. With `ThrowOnSendFailure = true` it throws `VevalSendException` instead, unless your agent already threw; then you get your agent's exception
 
 ### VevalExecutionContext
 

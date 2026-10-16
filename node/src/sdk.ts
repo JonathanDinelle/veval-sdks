@@ -13,6 +13,7 @@ import {
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
+import { ScenarioReport } from "./scenario-report";
 
 export class VevalSdk {
   protected readonly opts: ResolvedVevalOptions;
@@ -20,7 +21,7 @@ export class VevalSdk {
 
   constructor(options: VevalOptions) {
     this.opts = resolveOptions(options);
-    this.http = new VevalHttpClient(this.opts.apiKey, this.opts.endpoint);
+    this.http = new VevalHttpClient(this.opts.apiKey, this.opts.endpoint, this.opts.throwOnSendFailure);
   }
 
   async runAsync<T>(
@@ -32,15 +33,9 @@ export class VevalSdk {
     const ctx = new VevalExecutionContext(traceId, input ?? null);
     const startedAt = new Date();
 
+    let result: T;
     try {
-      const result = await callback(ctx);
-      const completedAt = new Date();
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input ?? null, result, "success", null, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
-      return result;
+      result = await callback(ctx);
     } catch (err) {
       const completedAt = new Date();
       const error = err instanceof Error ? err.message : String(err);
@@ -48,9 +43,18 @@ export class VevalSdk {
         traceId, agentName, ctx,
         input ?? null, null, "error", error, startedAt, completedAt
       );
-      await this.http.sendTraceAsync(payload);
+      // The agent's own error takes priority over a failed send (which is still logged).
+      await this.http.sendTraceAsync(payload, false);
       throw err;
     }
+
+    const completedAt = new Date();
+    const payload = VevalSdk.buildPayload(
+      traceId, agentName, ctx,
+      input ?? null, result, "success", null, startedAt, completedAt
+    );
+    await this.http.sendTraceAsync(payload);
+    return result;
   }
 
   async getTraceAsync(traceId: string): Promise<TraceData | null> {
@@ -162,6 +166,7 @@ export class VevalSdk {
   ): Promise<ScenarioRunResult> {
     const rawItems = items ?? (await this.http.getScenarioItemsAsync(scenarioName)) as ScenarioItem[];
     const results: ItemRunResult[] = [];
+    const report = new ScenarioReport(this.http, scenarioName);
 
     for (const item of rawItems) {
       const effectiveAssertions = [...scenarioAssertions, ...(item.assertions ?? [])];
@@ -189,11 +194,11 @@ export class VevalSdk {
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
             );
-            await this.http.sendTraceAsync(payload);
+            await report.sendTraceAsync(payload);
           }
         }
       } else if (item.input !== undefined) {
-        const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input);
+        const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input, report);
         for (const assertion of effectiveAssertions) {
           const failure = await assertion.evaluate(ctx);
           if (failure) {
@@ -210,57 +215,37 @@ export class VevalSdk {
       results.push(itemResult);
     }
 
-    const passCount = results.filter((r) => r.passed).length;
-    const failCount = results.length - passCount;
-    const scenarioResult: ScenarioRunResult = {
-      passed: failCount === 0,
-      pass_count: passCount,
-      fail_count: failCount,
-      results,
-    };
-
-    await this.http.postScenarioRunAsync(scenarioName, {
-      passed: scenarioResult.passed,
-      pass_count: scenarioResult.pass_count,
-      fail_count: scenarioResult.fail_count,
-      results: results.map((r) => ({
-        name: r.item.name ?? r.item.trace_id ?? "synthetic",
-        passed: r.passed,
-        failures: r.failures,
-        judgments: r.context?.judgments ?? [],
-      })),
-    });
-
-    return scenarioResult;
+    return report.completeAsync(results, "synthetic");
   }
 
+  /** Runs one synthetic scenario item, sends its trace through the report, and resolves to its context. */
   private async _runAndCaptureContext<T>(
     agentName: string,
     agent: (ctx: VevalExecutionContext) => Promise<T>,
-    input: unknown
+    input: unknown,
+    report: ScenarioReport
   ): Promise<VevalExecutionContext> {
     const traceId = `tr_${crypto.randomUUID().replace(/-/g, "")}`;
     const ctx = new VevalExecutionContext(traceId, input);
     const startedAt = new Date();
 
+    let output: unknown = null;
+    let status = "success";
+    let error: string | null = null;
     try {
-      const result = await agent(ctx);
-      const completedAt = new Date();
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input, result, "success", null, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
+      output = await agent(ctx);
     } catch (err) {
-      const completedAt = new Date();
-      const error = err instanceof Error ? err.message : String(err);
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input, null, "error", error, startedAt, completedAt
-      );
-      await this.http.sendTraceAsync(payload);
+      // Not rethrown: assertions see the error through the step statuses.
+      status = "error";
+      error = err instanceof Error ? err.message : String(err);
     }
 
+    const completedAt = new Date();
+    const payload = VevalSdk.buildPayload(
+      traceId, agentName, ctx,
+      input, output, status, error, startedAt, completedAt
+    );
+    await report.sendTraceAsync(payload);
     return ctx;
   }
 
