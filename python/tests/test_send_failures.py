@@ -7,6 +7,7 @@ import sys
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -30,6 +31,8 @@ class _Unauthorized(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    do_GET = do_POST
 
     def log_message(self, *args):
         pass
@@ -171,6 +174,23 @@ def test_strict_mode_raises_after_a_posted_scenario_whose_traces_were_lost():
             raise AssertionError("expected VevalSendError")
         except VevalSendError as ex:
             assert "1 trace(s) from scenario 'echo'" in str(ex)
+
+
+def test_scenario_items_that_cant_be_loaded_raise_even_without_strict_mode():
+    calls = []
+
+    async def counting(ctx):
+        calls.append(ctx.input)
+        return "answer"
+
+    with unauthorized_api(), veval_warnings():
+        sdk = VevalSdk(VevalOptions(api_key="wrong"))
+        try:
+            asyncio.run(sdk.run_scenario_async("echo", counting, []))
+            raise AssertionError("expected HTTPError")
+        except HTTPError as ex:
+            assert ex.code == 401
+    assert calls == []
 
 
 def test_cancelled_test_sdk_run_keeps_its_cancellation():

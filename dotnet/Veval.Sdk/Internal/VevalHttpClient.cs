@@ -44,20 +44,19 @@ internal class VevalHttpClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// Loads a scenario's items. Throws on failure — returning an empty list would run zero items and
+    /// report the scenario as passed.
+    /// </summary>
     internal async Task<List<ScenarioItemDto>> GetScenarioItemsAsync(string scenarioName)
     {
-        try
-        {
-            var response = await _http.GetAsync($"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/items");
-            if (!response.IsSuccessStatusCode) return new List<ScenarioItemDto>();
-            var json = await response.Content.ReadAsStringAsync();
-            var result = JsonSerializer.Deserialize<ScenarioItemsResponse>(json);
-            return result?.Items ?? new List<ScenarioItemDto>();
-        }
-        catch
-        {
-            return new List<ScenarioItemDto>();
-        }
+        var response = await _http.GetAsync($"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/items");
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                $"Loading items for scenario '{scenarioName}' failed with status {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+
+        var result = JsonSerializer.Deserialize<ScenarioItemsResponse>(await response.Content.ReadAsStringAsync());
+        return result?.Items ?? new List<ScenarioItemDto>();
     }
 
     /// <summary>Same failure behaviour as <see cref="SendTraceAsync"/>.</summary>

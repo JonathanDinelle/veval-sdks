@@ -49,15 +49,14 @@ class VevalHttpClient:
             return None
 
     async def get_scenario_items_async(self, scenario_name: str) -> list[dict]:
-        try:
-            import asyncio
-            encoded = quote(scenario_name, safe="")
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, self._get, f"{self._endpoint}/v1/scenarios/{encoded}/items"
-            )
-            return data.get("items", []) if data else []
-        except Exception:
-            return []
+        # Raises on failure — returning an empty list would run zero items and report the
+        # scenario as passed.
+        import asyncio
+        encoded = quote(scenario_name, safe="")
+        data = await asyncio.get_running_loop().run_in_executor(
+            None, self._get_json, f"{self._endpoint}/v1/scenarios/{encoded}/items"
+        )
+        return data.get("items") or []
 
     async def post_scenario_run_async(self, scenario_name: str, payload: Any) -> None:
         """Same failure behaviour as send_trace_async."""
@@ -136,6 +135,12 @@ class VevalHttpClient:
             if ex.code == 404:
                 return None
             raise
+
+    def _get_json(self, url: str) -> dict:
+        req = Request(url, headers=self._headers(), method="GET")
+        # urlopen raises HTTPError for any non-2xx status and URLError when there's no response.
+        with urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
 
     def _post_json(self, url: str, payload: Any) -> dict:
         body = json.dumps(payload, default=str).encode("utf-8")

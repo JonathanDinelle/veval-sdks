@@ -51,18 +51,17 @@ export class VevalHttpClient {
     }
   }
 
+  // Throws on failure — returning an empty list would run zero items and report the scenario as passed.
   async getScenarioItemsAsync(scenarioName: string): Promise<unknown[]> {
-    try {
-      const res = await fetch(
-        `${this.endpoint}/v1/scenarios/${encodeURIComponent(scenarioName)}/items`,
-        { headers: this.headers }
-      );
-      if (!res.ok) return [];
-      const body = (await res.json()) as { items: unknown[] };
-      return body.items ?? [];
-    } catch {
-      return [];
+    const res = await fetch(
+      `${this.endpoint}/v1/scenarios/${encodeURIComponent(scenarioName)}/items`,
+      { headers: this.headers }
+    );
+    if (!res.ok) {
+      throw new Error(`Loading items for scenario '${scenarioName}' failed with status ${res.status}: ${await res.text()}`);
     }
+    const body = (await res.json()) as { items?: unknown[] };
+    return body.items ?? [];
   }
 
   /** Same failure behaviour as sendTraceAsync. */

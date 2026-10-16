@@ -132,3 +132,14 @@ test("strict mode throws after a posted scenario whose traces were lost", async 
     );
   }, ["/v1/traces"]));
 });
+
+test("scenario items that can't be loaded throw, even without strict mode", async () => {
+  let calls = 0;
+  const counting = async (_ctx: VevalExecutionContext) => { calls++; return "answer"; };
+
+  await capturingWarnings(() => withUnauthorizedApi(async () => {
+    const sdk = new VevalSdk({ apiKey: "wrong" });
+    await assert.rejects(sdk.runScenarioAsync("echo", counting, []), /scenario 'echo'.*401/);
+  }));
+  assert.equal(calls, 0);
+});

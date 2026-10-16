@@ -175,4 +175,16 @@ public class SendFailureTests : IDisposable
 
         await act.Should().ThrowAsync<VevalSendException>().WithMessage("*1 trace(s) from scenario 'echo'*");
     }
+
+    [Fact]
+    public async Task ScenarioItemsThatCantBeLoaded_Throw_EvenWithoutStrictMode()
+    {
+        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: false));
+        var calls = 0;
+
+        var act = () => sdk.RunScenarioAsync("echo", _ => { calls++; return Task.FromResult("answer"); }, []);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*scenario 'echo'*401*");
+        calls.Should().Be(0);
+    }
 }
