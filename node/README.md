@@ -34,6 +34,8 @@ const answer = await veval.runAsync("my-agent", async (ctx) => {
 
 Every call to `trackStepAsync` records the step name, input, output, timing, and any metadata you attach.
 
+Replay serves recorded outputs only to code inside a step. Check `ctx.isReplay` before work outside a step that must not run again, such as sending an email; it is true in every replay, mocked or live.
+
 If a trace can't be stored (wrong API key, quota used up, network down), the SDK logs a `console.warn` with the HTTP status and carries on. Pass `throwOnSendFailure: true` in tests and CI to throw a `VevalSendError` instead.
 
 ## Testing

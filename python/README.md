@@ -49,6 +49,32 @@ async def agent(ctx: VevalExecutionContext) -> str:
     return await ctx.track_step_async("call-llm", ctx.input, llm_call)
 ```
 
+## Synchronous agents
+
+If your agent is plain synchronous code, use `run` and `track_step`. They take ordinary functions and don't start an event loop:
+
+```python
+def agent(ctx: VevalExecutionContext) -> str:
+    def llm_call(handle):
+        handle.set_meta("type", "llm")
+        return call_my_llm_sync(ctx.input)
+
+    return ctx.track_step("call-llm", ctx.input, llm_call)
+
+output = sdk.run("my-agent", agent, input="Hello")
+```
+
+`get_trace`, `replay` and `run_scenario` are synchronous too, for tests written without asyncio. Call them from synchronous code; inside a running event loop, await the `_async` versions.
+
+## Side effects during replay
+
+Replay serves recorded outputs only to code inside a step. Check `ctx.is_replay` before work outside a step that must not run again, such as sending an email. It is true in every replay, mocked or live:
+
+```python
+if not ctx.is_replay:
+    send_email(customer, reply)
+```
+
 ## Assertions
 
 Use `TraceAssert` to validate behaviour at the trace level:
@@ -163,13 +189,14 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 | Method | Description |
 |---|---|
 | `run_async(name, callback, input)` | Run agent and send trace |
-| `get_trace_async(trace_id)` | Fetch a recorded trace |
+| `run(name, callback, input)` | Synchronous `run_async`, for a plain-function agent |
+| `get_trace_async(trace_id)` / `get_trace(trace_id)` | Fetch a recorded trace |
 | `save_snapshot_async(name, trace_id_or_ctx)` | Store a named baseline (pins the trace) |
 | `get_snapshot_async(name)` | Load the latest stored baseline |
 | `load_snapshot_async(trace_id)` | Build a snapshot from a trace (not pinned) |
 | `compare_snapshot_async(name, snapshot, ctx, options)` | Diff a run against a baseline and record it |
-| `replay_async(trace, callback, options)` | Replay trace with mocked outputs |
-| `run_scenario_async(name, agent, assertions, items)` | Run a test scenario |
+| `replay_async(trace, callback, options)` / `replay(...)` | Replay trace with mocked outputs |
+| `run_scenario_async(name, agent, assertions, items)` / `run_scenario(...)` | Run a test scenario |
 
 ### `TraceAssert` built-ins
 

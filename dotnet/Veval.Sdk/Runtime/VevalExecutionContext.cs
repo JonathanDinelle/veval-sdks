@@ -32,6 +32,12 @@ public class VevalExecutionContext
     public IReadOnlyList<JudgeRecord> Judgments => _judgments;
     /// <summary>How each replayed step was bound to the recording; null when the run doesn't replay a recording.</summary>
     public ReplayFidelity? ReplayFidelity => _fidelity;
+    /// <summary>
+    /// True when this run replays a recorded trace: <c>ReplayAsync</c>, a trace-backed scenario item, or
+    /// <c>VevalTestSdk.WithReplay</c>, mocked or live. Check it before a side effect that isn't inside a step
+    /// served from the recording, such as sending an email; in a live replay, model steps run for real.
+    /// </summary>
+    public bool IsReplay { get; internal set; }
 
     public VevalExecutionContext(string traceId, object? input)
     {
@@ -112,6 +118,7 @@ public class VevalExecutionContext
     /// <param name="liveModelSteps">Run steps recorded as <c>llm</c> for real and serve every other step from the recording.</param>
     internal void LoadMockOutputs(TraceData trace, bool strict = true, bool liveModelSteps = false)
     {
+        IsReplay = true;
         _strictMockMode = strict;
         _liveModelSteps = liveModelSteps;
 

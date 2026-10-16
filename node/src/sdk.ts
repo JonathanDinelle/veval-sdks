@@ -134,6 +134,7 @@ export class VevalSdk {
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
+    ctx.markAsReplay();
     if (options?.live_model_steps) {
       ctx.loadMockOutputs(trace, true, true);
     } else if (options?.mock_llm_responses) {

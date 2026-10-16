@@ -35,6 +35,14 @@ class VevalExecutionContext:
         self._fidelity: Optional[ReplayFidelity] = None
         self._strict_mock_mode = False
         self._live_model_steps = False
+        self._is_replay = False
+
+    @property
+    def is_replay(self) -> bool:
+        """True when this run replays a recorded trace: replay_async, a trace-backed scenario item, or
+        VevalTestSdk.with_replay, mocked or live. Check it before a side effect that isn't inside a step
+        served from the recording, such as sending an email; in a live replay, model steps run for real."""
+        return self._is_replay
 
     @property
     def steps(self) -> list[Step]:
@@ -67,60 +75,85 @@ class VevalExecutionContext:
         input: Any,
         step: Callable[..., Awaitable[T]],
     ) -> T:
-        if self._recorded is not None:
-            recorded, exact = self._find_recording(name, input)
-            # In live mode a model step runs for real, including extra calls of a step recorded as a model step.
-            recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
-            run_live = self._live_model_steps and recorded_type == "llm"
+        served, output = self._serve_from_recording(name, input)
+        if served:
+            return output
 
-            if recorded is None and not run_live and self._strict_mock_mode:
-                available = ", ".join(dict.fromkeys(r.data.name for r in self._recorded if not r.consumed))
-                raise RuntimeError(
-                    f"Live replay: step '{name}' has no recording to serve, and only steps recorded as 'llm' run live. "
-                    f"Available steps: {available}. Running it could have reached a real system."
-                    if self._live_model_steps else
-                    f"Replay mode: no mock output for step '{name}'. "
-                    f"Available steps: {available}. "
-                    "This would have made a real LLM call."
-                )
-            if recorded is not None:
-                recorded.consumed = True
-
-            assert self._fidelity is not None
-            if run_live:
-                self._fidelity._record(ReplayBinding(
-                    name, LIVE, recorded.index if recorded else None, recorded.data.input if recorded else None, input,
-                ))
-            elif recorded is not None:
-                self._fidelity._record(ReplayBinding(
-                    name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input,
-                ))
-                mock = recorded.data.output
-                s = Step(name)
-                s.input = input
-                # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
-                s.type = recorded.data.type or "custom"
-                s.metadata["_source"] = "replay"
-                s.complete(mock)
-                self._steps.append(s)
-                return mock  # type: ignore[return-value]
-
-        s = Step(name)
-        s.input = input
-        self._steps.append(s)
-        handle = StepHandle(s)
-
+        s, handle = self._start_step(name, input)
         try:
-            sig = inspect.signature(step)
-            if len(sig.parameters) > 0:
-                result = await step(handle)
-            else:
-                result = await step()  # type: ignore[call-arg]
+            result = await (step(handle) if _takes_handle(step) else step())
             s.complete(result)
             return result
         except Exception as ex:
             s.fail(str(ex))
             raise
+
+    def track_step(self, name: str, input: Any, step: Callable[..., T]) -> T:
+        """Synchronous track_step_async, for a step whose work is a plain function. Replays the same way."""
+        served, output = self._serve_from_recording(name, input)
+        if served:
+            return output
+
+        s, handle = self._start_step(name, input)
+        try:
+            result = step(handle) if _takes_handle(step) else step()
+            s.complete(result)
+            return result
+        except Exception as ex:
+            s.fail(str(ex))
+            raise
+
+    def _start_step(self, name: str, input: Any) -> tuple[Step, StepHandle]:
+        s = Step(name)
+        s.input = input
+        self._steps.append(s)
+        return s, StepHandle(s)
+
+    def _serve_from_recording(self, name: str, input: Any) -> tuple[bool, Any]:
+        """In a replay, binds the call to a recording. Returns (True, recorded output) when the step is served
+        from the recording, or (False, None) when it should run."""
+        if self._recorded is None:
+            return False, None
+
+        recorded, exact = self._find_recording(name, input)
+        # In live mode a model step runs for real, including extra calls of a step recorded as a model step.
+        recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
+        run_live = self._live_model_steps and recorded_type == "llm"
+
+        if recorded is None and not run_live and self._strict_mock_mode:
+            available = ", ".join(dict.fromkeys(r.data.name for r in self._recorded if not r.consumed))
+            raise RuntimeError(
+                f"Live replay: step '{name}' has no recording to serve, and only steps recorded as 'llm' run live. "
+                f"Available steps: {available}. Running it could have reached a real system."
+                if self._live_model_steps else
+                f"Replay mode: no mock output for step '{name}'. "
+                f"Available steps: {available}. "
+                "This would have made a real LLM call."
+            )
+        if recorded is not None:
+            recorded.consumed = True
+
+        assert self._fidelity is not None
+        if run_live:
+            self._fidelity._record(ReplayBinding(
+                name, LIVE, recorded.index if recorded else None, recorded.data.input if recorded else None, input,
+            ))
+            return False, None
+        if recorded is None:
+            return False, None
+
+        self._fidelity._record(ReplayBinding(
+            name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input,
+        ))
+        mock = recorded.data.output
+        s = Step(name)
+        s.input = input
+        # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
+        s.type = recorded.data.type or "custom"
+        s.metadata["_source"] = "replay"
+        s.complete(mock)
+        self._steps.append(s)
+        return True, mock
 
     def set_metadata(self, key: str, value: Any) -> None:
         self._metadata[key] = value
@@ -132,6 +165,7 @@ class VevalExecutionContext:
                 f"Replay trace '{trace.trace_id}' has no steps. Cannot mock LLM calls. "
                 "Ensure the trace was recorded with steps before using it for replay."
             )
+        self._is_replay = True
         self._strict_mock_mode = strict
         self._live_model_steps = live_model_steps
         self._recorded = [_RecordedStep(step, i) for i, step in enumerate(trace.steps)]
@@ -151,6 +185,10 @@ class VevalExecutionContext:
     def _recorded_type_of(self, name: str) -> Optional[str]:
         """The recorded type of a step name, used and unused alike; None when the trace never recorded it."""
         return next((r.data.type for r in self._recorded or [] if r.data.name == name), None)
+
+
+def _takes_handle(step: Callable[..., Any]) -> bool:
+    return len(inspect.signature(step).parameters) > 0
 
 
 class _RecordedStep:
