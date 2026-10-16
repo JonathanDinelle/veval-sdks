@@ -122,7 +122,7 @@ class ReplayResult:
     error: Optional[str] = None
     # How the replay differed from its recording; set when compare_with_recording is on.
     recording_diff: Optional[SnapshotDiff] = None
-    # How each call was bound to the recording; set when mock_llm_responses is on.
+    # How each call was bound to the recording; set for mocked and live replays (mock_llm_responses or live_model_steps).
     fidelity: Optional[ReplayFidelity] = None
 
     @property

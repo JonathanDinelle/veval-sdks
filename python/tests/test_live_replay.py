@@ -51,12 +51,17 @@ def sdk():
     return VevalSdk(VevalOptions(api_key="test"))
 
 
-def run_scenario(prompt, mock_model_steps=False, on_portal_visit=None):
+def run_scenario(prompt, item_mock=False, scenario_mock=False, on_portal_visit=None):
+    """Runs a trace-backed scenario item through VevalSdk, with the trace served locally instead of from the API."""
     trace = briefing_trace()
-    test_sdk = VevalTestSdk(VevalOptions(api_key="test")).with_replay(trace)
-    return asyncio.run(test_sdk.run_scenario_async(
+    veval = sdk()
+
+    async def get_trace(_trace_id):
+        return trace
+    veval.get_trace_async = get_trace
+    return asyncio.run(veval.run_scenario_async(
         "briefing", briefing_agent(prompt, on_portal_visit), [TraceAssert.output_contains("OVERDUE")],
-        [ScenarioItem(trace_id=trace.trace_id, mock_model_steps=mock_model_steps)],
+        [ScenarioItem(trace_id=trace.trace_id, mock_model_steps=item_mock)], mock_model_steps=scenario_mock,
     ))
 
 
@@ -71,8 +76,24 @@ def test_trace_backed_scenario_catches_a_regressed_prompt_and_passes_the_unchang
     assert visits == [], "tool steps are served from the recording"
 
 
-def test_trace_backed_scenario_with_mock_model_steps_cannot_see_the_prompt_change():
-    assert run_scenario(REGRESSED_PROMPT, mock_model_steps=True).passed  # mocked replay returns the old output
+def test_trace_backed_scenario_mocked_by_the_item_or_the_scenario_cannot_see_the_prompt_change():
+    assert run_scenario(REGRESSED_PROMPT, item_mock=True).passed  # mocked replay returns the old output
+    assert run_scenario(REGRESSED_PROMPT, scenario_mock=True).passed
+
+
+def test_test_sdk_scenario_always_replays_mocked():
+    trace = briefing_trace()
+    model_calls = []
+
+    async def agent(ctx):
+        await ctx.track_step_async("visit_portal", "today", returning("live"))
+        return await ctx.track_step_async("write_briefing", REGRESSED_PROMPT, returning("live", lambda: model_calls.append(1)))
+
+    test_sdk = VevalTestSdk(VevalOptions(api_key="test")).with_replay(trace)
+    result = asyncio.run(test_sdk.run_scenario_async(
+        "briefing", agent, [TraceAssert.output_contains("OVERDUE")], [ScenarioItem(trace_id=trace.trace_id)]))
+    assert result.passed  # the test double serves the recorded model output
+    assert model_calls == []  # and never makes a live model call
 
 
 def test_live_replay_reports_model_steps_as_live():

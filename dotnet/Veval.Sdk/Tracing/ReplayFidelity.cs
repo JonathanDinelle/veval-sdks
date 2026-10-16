@@ -48,6 +48,14 @@ public class ReplayFidelity
         if (binding.RecordedIndex is { } index) _unused.RemoveAll(u => u.RecordedIndex == index);
     }
 
+    /// <summary>
+    /// The replay's binding failure, or null. A mocked replay fails when a recorded step was never called; a live
+    /// replay fails when no step ran live (a live model may legitimately skip recorded steps). Not called when the
+    /// agent threw, since the exception already explains the rest.
+    /// </summary>
+    internal string? Failure(string traceId, bool liveModelSteps) =>
+        liveModelSteps ? NoLiveStepFailure(traceId) : UnusedFailure(traceId);
+
     /// <summary>The failure for recorded steps that were never called, or null when every recording was used.</summary>
     internal string? UnusedFailure(string traceId)
     {

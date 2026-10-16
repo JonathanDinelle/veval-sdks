@@ -26,17 +26,21 @@ const briefingAgent = (prompt: string, onPortalVisit?: () => void) => async (ctx
   return ctx.trackStepAsync("write_briefing", prompt, async () => fakeModel(prompt));
 };
 
-const runScenario = (prompt: string, mockModelSteps = false, onPortalVisit?: () => void) => {
+/** Runs a trace-backed scenario item through VevalSdk, with the trace served locally instead of from the API. */
+const runScenario = (prompt: string, opts: { itemMock?: boolean; scenarioMock?: boolean; onPortalVisit?: () => void } = {}) => {
   const trace = briefingTrace();
-  return testSdk().withReplay(trace).runScenarioAsync("briefing", briefingAgent(prompt, onPortalVisit),
+  const veval = sdk();
+  veval.getTraceAsync = async () => trace;
+  return veval.runScenarioAsync("briefing", briefingAgent(prompt, opts.onPortalVisit),
     [TraceAssert.outputContains("OVERDUE")],
-    [{ trace_id: trace.trace_id, mock_model_steps: mockModelSteps, assertions: [] }]);
+    [{ trace_id: trace.trace_id, mock_model_steps: opts.itemMock, assertions: [] }],
+    { mock_model_steps: opts.scenarioMock });
 };
 
 test("trace-backed scenario catches a regressed prompt and passes the unchanged one", async () => {
   let portalVisits = 0;
-  const unchanged = await runScenario(PROMPT, false, () => portalVisits++);
-  const regressed = await runScenario(REGRESSED_PROMPT, false, () => portalVisits++);
+  const unchanged = await runScenario(PROMPT, { onPortalVisit: () => portalVisits++ });
+  const regressed = await runScenario(REGRESSED_PROMPT, { onPortalVisit: () => portalVisits++ });
 
   assert.equal(unchanged.passed, true, unchanged.results[0].failures.join("; "));
   assert.equal(regressed.passed, false);
@@ -44,9 +48,21 @@ test("trace-backed scenario catches a regressed prompt and passes the unchanged 
   assert.equal(portalVisits, 0, "tool steps are served from the recording");
 });
 
-test("trace-backed scenario with mock_model_steps cannot see the prompt change", async () => {
-  const regressed = await runScenario(REGRESSED_PROMPT, true);
-  assert.equal(regressed.passed, true, "mocked replay returns the old prompt's output");
+test("trace-backed scenario mocked by the item or the whole scenario cannot see the prompt change", async () => {
+  assert.equal((await runScenario(REGRESSED_PROMPT, { itemMock: true })).passed, true);
+  assert.equal((await runScenario(REGRESSED_PROMPT, { scenarioMock: true })).passed, true);
+});
+
+test("test SDK scenario always replays mocked", async () => {
+  const trace = briefingTrace();
+  let modelCalls = 0;
+  const result = await testSdk().withReplay(trace).runScenarioAsync("briefing", async (ctx) => {
+    await ctx.trackStepAsync("visit_portal", "today", async () => "live");
+    return ctx.trackStepAsync("write_briefing", REGRESSED_PROMPT, async () => { modelCalls++; return "live"; });
+  }, [TraceAssert.outputContains("OVERDUE")], [{ trace_id: trace.trace_id, assertions: [] }]);
+
+  assert.equal(result.passed, true, "the test double serves the recorded model output");
+  assert.equal(modelCalls, 0, "the test double never makes a live model call");
 });
 
 test("live replay reports model steps as live", async () => {

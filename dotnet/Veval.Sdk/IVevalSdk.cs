@@ -26,6 +26,10 @@ public interface IVevalSdk : IDisposable
     Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx, SnapshotOptions? options = null);
 
     Task<ReplayResult> ReplayAsync<T>(TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options);
-    Task<ScenarioRunResult> RunScenarioAsync<T>(string scenarioName, Func<VevalExecutionContext, Task<T>> agent, ITraceAssertion[] scenarioAssertions, ScenarioItem[]? items = null);
+    /// <param name="mockModelSteps">
+    /// Replay every trace-backed item fully mocked, as if each set <see cref="ScenarioItem.MockModelSteps"/>; this is
+    /// the switch for items loaded from the dashboard. <see cref="VevalTestSdk"/> always replays mocked.
+    /// </param>
+    Task<ScenarioRunResult> RunScenarioAsync<T>(string scenarioName, Func<VevalExecutionContext, Task<T>> agent, ITraceAssertion[] scenarioAssertions, ScenarioItem[]? items = null, bool mockModelSteps = false);
     Task<JudgeResult> JudgeAsync(string criteria, VevalExecutionContext ctx, JudgeOptions? options = null);
 }

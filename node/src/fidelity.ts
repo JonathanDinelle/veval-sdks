@@ -70,6 +70,15 @@ export class ReplayFidelity {
       this._unused = this._unused.filter((u) => u.recorded_index !== binding.recorded_index);
   }
 
+  /**
+   * @internal The replay's binding failure, or null. A mocked replay fails when a recorded step was never called; a
+   * live replay fails when no step ran live (a live model may legitimately skip recorded steps). Not called when the
+   * agent threw, since the exception already explains the rest.
+   */
+  failure(traceId: string, liveModelSteps: boolean): string | null {
+    return liveModelSteps ? this.noLiveStepFailure(traceId) : this.unusedFailure(traceId);
+  }
+
   /** @internal The failure for recorded steps that were never called, or null when every recording was used. */
   unusedFailure(traceId: string): string | null {
     if (this._unused.length === 0) return null;

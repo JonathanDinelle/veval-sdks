@@ -30,7 +30,7 @@ public class VevalExecutionContext
     public IReadOnlyDictionary<string, object> TraceMeta => _metadata;
     /// <summary>Judge verdicts recorded by <c>TraceAssert.Judge</c> during this run.</summary>
     public IReadOnlyList<JudgeRecord> Judgments => _judgments;
-    /// <summary>How each replayed step was bound to the recording; null when the run is not a mocked replay.</summary>
+    /// <summary>How each replayed step was bound to the recording; null when the run doesn't replay a recording.</summary>
     public ReplayFidelity? ReplayFidelity => _fidelity;
 
     public VevalExecutionContext(string traceId, object? input)

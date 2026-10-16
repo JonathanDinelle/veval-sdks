@@ -38,7 +38,7 @@ If a trace can't be stored (wrong API key, quota used up, network down), the SDK
 
 ## Testing
 
-`VevalTestSdk` replays recorded traces through your agent code with the recorded outputs served for every step (matched by step name and identical input, reported in `result.fidelity`; a recorded step the agent never calls fails the replay), and `TraceAssert` provides assertions (`noErrors`, `maxSteps`, `judge`, `matchesSnapshot`, …) for replays and scenarios. A trace-backed scenario item replays live: steps recorded with `setMeta("type", "llm")` call the model, every other step returns its recorded output (`mock_model_steps: true` on the item for a fully mocked replay; `live_model_steps: true` in `replayAsync` options for the same in a single replay). See the guides at [docs.veval.dev](https://docs.veval.dev).
+`VevalTestSdk` replays recorded traces through your agent code with the recorded outputs served for every step (matched by step name and identical input, reported in `result.fidelity`; a recorded step the agent never calls fails the replay), and `TraceAssert` provides assertions (`noErrors`, `maxSteps`, `judge`, `matchesSnapshot`, …) for replays and scenarios. A trace-backed scenario item replays live: steps recorded with `setMeta("type", "llm")` call the model, every other step returns its recorded output (`mock_model_steps: true` on the item, or `{ mock_model_steps: true }` as `runScenarioAsync`'s fifth argument for every item, for a fully mocked replay; `VevalTestSdk` always replays mocked; `live_model_steps: true` in `replayAsync` options for the same in a single replay). See the guides at [docs.veval.dev](https://docs.veval.dev).
 
 ## License
 

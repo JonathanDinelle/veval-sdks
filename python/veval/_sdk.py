@@ -142,13 +142,8 @@ class VevalSdk:
         failures: list[str] = []
         if error:
             failures.append(f"Replay threw exception: {error}")
-        # An exception already explains why the rest of the recording went unused or nothing ran live.
-        # A live model may legitimately take a different path, so unused recordings fail mocked replays only.
         fidelity = ctx.replay_fidelity
-        binding_failure = None
-        if not error and fidelity is not None:
-            binding_failure = (fidelity._no_live_step_failure(trace.trace_id) if options.live_model_steps
-                               else fidelity._unused_failure(trace.trace_id))
+        binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
         if binding_failure:
             failures.append(binding_failure)
         for assertion in options.assertions:
@@ -182,7 +177,10 @@ class VevalSdk:
         agent: Callable[[VevalExecutionContext], Awaitable[T]],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
+        mock_model_steps: bool = False,
     ) -> ScenarioRunResult:
+        """mock_model_steps replays every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps;
+        it is the switch for items loaded from the dashboard."""
         if items is None:
             raw_items = await self._client.get_scenario_items_async(scenario_name)
             resolved_items = [
@@ -210,9 +208,7 @@ class VevalSdk:
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
-                        # Model steps run live and tools are served from the recording, unless the item opts into mocked replay.
-                        ReplayOptions(mock_llm_responses=item.mock_model_steps, live_model_steps=not item.mock_model_steps,
-                                      assertions=effective_assertions),
+                        _scenario_replay_options(item, mock_model_steps, effective_assertions),
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.context = replay_result.replayed_context
@@ -328,6 +324,13 @@ class VevalSdk:
                 for s in steps
             ],
         }
+
+
+def _scenario_replay_options(item: ScenarioItem, mock_model_steps: bool, assertions: list) -> ReplayOptions:
+    """How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
+    the whole scenario opts into mocked replay."""
+    mocked = mock_model_steps or item.mock_model_steps
+    return ReplayOptions(mock_llm_responses=mocked, live_model_steps=not mocked, assertions=assertions)
 
 
 def _missing_trace_message(trace_id: str) -> str:

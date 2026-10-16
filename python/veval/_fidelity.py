@@ -70,6 +70,12 @@ class ReplayFidelity:
         if binding.recorded_index is not None:
             self._unused = [u for u in self._unused if u.recorded_index != binding.recorded_index]
 
+    def _failure(self, trace_id: str, live_model_steps: bool) -> Optional[str]:
+        """The replay's binding failure, or None. A mocked replay fails when a recorded step was never called; a live
+        replay fails when no step ran live (a live model may legitimately skip recorded steps). Not called when the
+        agent raised, since the exception already explains the rest."""
+        return self._no_live_step_failure(trace_id) if live_model_steps else self._unused_failure(trace_id)
+
     def _unused_failure(self, trace_id: str) -> Optional[str]:
         """The failure for recorded steps that were never called, or None when every recording was used."""
         if not self._unused:

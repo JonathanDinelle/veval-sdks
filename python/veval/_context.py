@@ -50,7 +50,7 @@ class VevalExecutionContext:
 
     @property
     def replay_fidelity(self) -> Optional[ReplayFidelity]:
-        """How each replayed step was bound to the recording; None when the run is not a mocked replay."""
+        """How each replayed step was bound to the recording; None when the run doesn't replay a recording."""
         return self._fidelity
 
     def record_judgment(self, criteria: str, score: float, passed: bool, reasoning: str) -> None:

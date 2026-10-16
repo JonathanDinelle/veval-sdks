@@ -110,10 +110,7 @@ public class VevalSdk : IVevalSdk
 
         var failures = new List<string>();
         if (error != null) failures.Add($"Replay threw exception: {error}");
-        // An exception already explains why the rest of the recording went unused or nothing ran live.
-        // A live model may legitimately take a different path, so unused recordings fail mocked replays only.
-        if (error == null && ctx.ReplayFidelity is { } fidelity
-            && (options.LiveModelSteps ? fidelity.NoLiveStepFailure(trace.TraceId) : fidelity.UnusedFailure(trace.TraceId)) is { } bindingFailure)
+        if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
             failures.Add(bindingFailure);
         foreach (var assertion in options.Assertions)
         {
@@ -141,7 +138,8 @@ public class VevalSdk : IVevalSdk
         string scenarioName,
         Func<VevalExecutionContext, Task<T>> agent,
         ITraceAssertion[] scenarioAssertions,
-        ScenarioItem[]? items = null)
+        ScenarioItem[]? items = null,
+        bool mockModelSteps = false)
     {
         // Resolve items: inline takes precedence, otherwise fetch from API
         var resolvedItems = items ?? (await _client.GetScenarioItemsAsync(scenarioName))
@@ -158,7 +156,6 @@ public class VevalSdk : IVevalSdk
 
             if (item.TraceId != null)
             {
-                // Trace-backed item: model steps run live and tools are served from the recording, unless the item opts into mocked replay
                 var trace = await GetTraceAsync(item.TraceId);
                 if (trace == null)
                 {
@@ -166,12 +163,7 @@ public class VevalSdk : IVevalSdk
                 }
                 else
                 {
-                    var replayResult = await ReplayAsync(trace, agent, new ReplayOptions
-                    {
-                        MockLlmResponses = item.MockModelSteps,
-                        LiveModelSteps = !item.MockModelSteps,
-                        Assertions = effectiveAssertions,
-                    });
+                    var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, mockModelSteps, effectiveAssertions));
                     itemResult.Failures.AddRange(replayResult.Failures);
                     itemResult.Context = replayResult.ReplayedContext;
 
@@ -212,6 +204,16 @@ public class VevalSdk : IVevalSdk
         await report.CompleteAsync(scenarioResult, unnamedItem: "synthetic");
 
         return scenarioResult;
+    }
+
+    /// <summary>
+    /// How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
+    /// the whole scenario opts into mocked replay.
+    /// </summary>
+    internal static ReplayOptions ScenarioReplayOptions(ScenarioItem item, bool mockModelSteps, ITraceAssertion[] assertions)
+    {
+        var mocked = mockModelSteps || item.MockModelSteps;
+        return new ReplayOptions { MockLlmResponses = mocked, LiveModelSteps = !mocked, Assertions = assertions };
     }
 
     /// <summary>Runs one synthetic scenario item, sends its trace through the report, and returns its context.</summary>

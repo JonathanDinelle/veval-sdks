@@ -41,34 +41,54 @@ public class LiveReplayTests
         return await ctx.TrackStepAsync("write_briefing", prompt, () => Task.FromResult(FakeModel(prompt, items)));
     };
 
-    private static Task<ScenarioRunResult> RunScenario(string prompt, bool mockModelSteps = false, Action? onPortalVisit = null)
-    {
-        var trace = BriefingTrace();
-        var sdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" }).WithReplay(trace);
-        return sdk.RunScenarioAsync("briefing", BriefingAgent(prompt, onPortalVisit),
-            [TraceAssert.OutputContains("OVERDUE")],
-            [new ScenarioItem { TraceId = trace.TraceId, MockModelSteps = mockModelSteps }]);
-    }
+    /// <summary>Replays the trace the way <c>VevalSdk.RunScenarioAsync</c> replays a trace-backed item.</summary>
+    private static Task<ReplayResult> ReplayAsScenarioItem(string prompt, ScenarioItem item, bool scenarioMock = false, Action? onPortalVisit = null) =>
+        new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), BriefingAgent(prompt, onPortalVisit),
+            VevalSdk.ScenarioReplayOptions(item, scenarioMock, [TraceAssert.OutputContains("OVERDUE")]));
 
     [Fact]
-    public async Task TraceBackedScenario_CatchesARegressedPrompt_AndPassesTheUnchangedOne()
+    public async Task TraceBackedItem_CatchesARegressedPrompt_AndPassesTheUnchangedOne()
     {
         var portalVisits = 0;
+        var item = new ScenarioItem { TraceId = "tr_briefing" };
 
-        var unchanged = await RunScenario(Prompt, onPortalVisit: () => portalVisits++);
-        var regressed = await RunScenario(RegressedPrompt, onPortalVisit: () => portalVisits++);
+        var unchanged = await ReplayAsScenarioItem(Prompt, item, onPortalVisit: () => portalVisits++);
+        var regressed = await ReplayAsScenarioItem(RegressedPrompt, item, onPortalVisit: () => portalVisits++);
 
-        unchanged.Passed.Should().BeTrue(string.Join("; ", unchanged.Results[0].Failures));
+        unchanged.Passed.Should().BeTrue(string.Join("; ", unchanged.Failures));
         regressed.Passed.Should().BeFalse();
-        regressed.Results[0].Failures.Should().Contain(f => f.Contains("OutputContains"));
+        regressed.Failures.Should().Contain(f => f.Contains("OutputContains"));
         portalVisits.Should().Be(0, "tool steps are served from the recording");
     }
 
-    [Fact]
-    public async Task TraceBackedScenario_MockModelSteps_CannotSeeThePromptChange()
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task TraceBackedItem_MockedByTheItemOrTheScenario_CannotSeeThePromptChange(bool itemMock, bool scenarioMock)
     {
-        var regressed = await RunScenario(RegressedPrompt, mockModelSteps: true);
+        var regressed = await ReplayAsScenarioItem(RegressedPrompt,
+            new ScenarioItem { TraceId = "tr_briefing", MockModelSteps = itemMock }, scenarioMock);
         regressed.Passed.Should().BeTrue("mocked replay returns the old prompt's output");
+        regressed.Fidelity!.Live.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task TestSdkScenario_AlwaysReplaysMocked()
+    {
+        var trace = BriefingTrace();
+        var modelCalls = 0;
+        var sdk = new VevalTestSdk(new VevalOptions { ApiKey = "test" }).WithReplay(trace);
+
+        var result = await sdk.RunScenarioAsync("briefing", async ctx =>
+            {
+                await ctx.TrackStepAsync("visit_portal", "today", () => Task.FromResult("live"));
+                return await ctx.TrackStepAsync("write_briefing", RegressedPrompt, () => { modelCalls++; return Task.FromResult("live"); });
+            },
+            [TraceAssert.OutputContains("OVERDUE")],
+            [new ScenarioItem { TraceId = trace.TraceId }]);
+
+        result.Passed.Should().BeTrue("the test double serves the recorded model output");
+        modelCalls.Should().Be(0, "the test double never makes a live model call");
     }
 
     [Fact]

@@ -61,7 +61,7 @@ export class VevalExecutionContext {
     return this._judgments;
   }
 
-  /** How each replayed step was bound to the recording; null when the run is not a mocked replay. */
+  /** How each replayed step was bound to the recording; null when the run doesn't replay a recording. */
   get replayFidelity(): ReplayFidelity | null {
     return this._fidelity;
   }
