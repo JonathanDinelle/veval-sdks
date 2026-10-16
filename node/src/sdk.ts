@@ -13,6 +13,7 @@ import {
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
+import { ScenarioReport } from "./scenario-report";
 
 export class VevalSdk {
   protected readonly opts: ResolvedVevalOptions;
@@ -165,7 +166,7 @@ export class VevalSdk {
   ): Promise<ScenarioRunResult> {
     const rawItems = items ?? (await this.http.getScenarioItemsAsync(scenarioName)) as ScenarioItem[];
     const results: ItemRunResult[] = [];
-    let undelivered = 0;
+    const report = new ScenarioReport(this.http, scenarioName);
 
     for (const item of rawItems) {
       const effectiveAssertions = [...scenarioAssertions, ...(item.assertions ?? [])];
@@ -193,12 +194,11 @@ export class VevalSdk {
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
             );
-            if (!(await this.http.sendTraceAsync(payload, false))) undelivered++;
+            await report.sendTraceAsync(payload);
           }
         }
       } else if (item.input !== undefined) {
-        const { ctx, delivered } = await this._runAndCaptureContext(scenarioName, agent, item.input);
-        if (!delivered) undelivered++;
+        const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input, report);
         for (const assertion of effectiveAssertions) {
           const failure = await assertion.evaluate(ctx);
           if (failure) {
@@ -215,37 +215,16 @@ export class VevalSdk {
       results.push(itemResult);
     }
 
-    const passCount = results.filter((r) => r.passed).length;
-    const failCount = results.length - passCount;
-    const scenarioResult: ScenarioRunResult = {
-      passed: failCount === 0,
-      pass_count: passCount,
-      fail_count: failCount,
-      results,
-    };
-
-    await this.http.postScenarioRunAsync(scenarioName, {
-      passed: scenarioResult.passed,
-      pass_count: scenarioResult.pass_count,
-      fail_count: scenarioResult.fail_count,
-      results: results.map((r) => ({
-        name: r.item.name ?? r.item.trace_id ?? "synthetic",
-        passed: r.passed,
-        failures: r.failures,
-        judgments: r.context?.judgments ?? [],
-      })),
-    });
-    this.http.throwIfUndelivered(scenarioName, undelivered);
-
-    return scenarioResult;
+    return report.completeAsync(results, "synthetic");
   }
 
-  /** Runs one synthetic scenario item; resolves to its context and whether its trace was stored. */
+  /** Runs one synthetic scenario item, sends its trace through the report, and resolves to its context. */
   private async _runAndCaptureContext<T>(
     agentName: string,
     agent: (ctx: VevalExecutionContext) => Promise<T>,
-    input: unknown
-  ): Promise<{ ctx: VevalExecutionContext; delivered: boolean }> {
+    input: unknown,
+    report: ScenarioReport
+  ): Promise<VevalExecutionContext> {
     const traceId = `tr_${crypto.randomUUID().replace(/-/g, "")}`;
     const ctx = new VevalExecutionContext(traceId, input);
     const startedAt = new Date();
@@ -266,8 +245,8 @@ export class VevalSdk {
       traceId, agentName, ctx,
       input, output, status, error, startedAt, completedAt
     );
-    const delivered = await this.http.sendTraceAsync(payload, false);
-    return { ctx, delivered };
+    await report.sendTraceAsync(payload);
+    return ctx;
   }
 
   static buildPayload(

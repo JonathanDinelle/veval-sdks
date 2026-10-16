@@ -186,7 +186,7 @@ public class VevalTestSdk : IVevalSdk
         ScenarioItem[]? items = null)
     {
         var scenarioResult = new ScenarioRunResult();
-        var undelivered = 0;
+        var report = new ScenarioReport(_reportingClient, scenarioName);
         var resolvedItems = items ?? Array.Empty<ScenarioItem>();
 
         foreach (var item in resolvedItems)
@@ -222,7 +222,7 @@ public class VevalTestSdk : IVevalSdk
                             ["replay"] = true,
                             ["source_trace_id"] = item.TraceId,
                         });
-                    if (!await _reportingClient.SendTraceAsync(payload, throwOnFailure: false)) undelivered++;
+                    await report.SendTraceAsync(payload);
                 }
             }
             else if (item.Input != null)
@@ -246,20 +246,7 @@ public class VevalTestSdk : IVevalSdk
             scenarioResult.Results.Add(itemResult);
         }
 
-        await _reportingClient.PostScenarioRunAsync(scenarioName, new
-        {
-            passed = scenarioResult.Passed,
-            pass_count = scenarioResult.PassCount,
-            fail_count = scenarioResult.FailCount,
-            results = scenarioResult.Results.Select(r => new
-            {
-                name = r.Item.Name ?? r.Item.TraceId ?? "item",
-                passed = r.Passed,
-                failures = r.Failures,
-                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
-            }),
-        });
-        _reportingClient.ThrowIfUndelivered(scenarioName, undelivered);
+        await report.CompleteAsync(scenarioResult, unnamedItem: "item");
 
         return scenarioResult;
     }

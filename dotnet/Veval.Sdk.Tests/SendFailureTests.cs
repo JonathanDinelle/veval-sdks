@@ -14,8 +14,9 @@ public class SendFailureTests : IDisposable
     private readonly TcpListener _unauthorizedApi = new(IPAddress.Loopback, 0);
     private readonly List<string> _warnings = new();
 
-    // Path prefixes the fake API rejects with 401; everything else gets 200.
+    // Path prefixes the fake API rejects with 401 or answers with 404; everything else gets 200.
     private string[] _rejected = ["/"];
+    private string[] _missing = [];
 
     public SendFailureTests()
     {
@@ -43,10 +44,12 @@ public class SendFailureTests : IDisposable
                 var stream = client.GetStream();
                 var path = await ReadRequestAsync(stream);
                 const string body = "{\"error\":\"invalid api key\"}";
-                var response = _rejected.Any(path.StartsWith)
-                    ? "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n" +
-                      $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"
-                    : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                var response =
+                    _missing.Any(path.StartsWith) ? "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    : _rejected.Any(path.StartsWith)
+                        ? "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n" +
+                          $"Content-Length: {body.Length}\r\nConnection: close\r\n\r\n{body}"
+                        : "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
                 await stream.WriteAsync(Encoding.ASCII.GetBytes(response));
             }
         }
@@ -184,7 +187,45 @@ public class SendFailureTests : IDisposable
 
         var act = () => sdk.RunScenarioAsync("echo", _ => { calls++; return Task.FromResult("answer"); }, []);
 
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*scenario 'echo'*401*");
+        var thrown = await act.Should().ThrowAsync<VevalRequestException>().WithMessage("*scenario 'echo'*401*invalid api key*");
+        thrown.Which.StatusCode.Should().Be(401);
         calls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task TracesThatCantBeLoaded_Throw_InsteadOfLookingMissing()
+    {
+        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: false));
+
+        var act = () => sdk.RunScenarioAsync("echo", _ => Task.FromResult("answer"), [],
+            [new ScenarioItem { Name = "a", TraceId = "tr_saved" }]);
+
+        var thrown = await act.Should().ThrowAsync<VevalRequestException>().WithMessage("*trace 'tr_saved'*401*");
+        thrown.Which.StatusCode.Should().Be(401);
+    }
+
+    [Fact]
+    public async Task MissingTrace_FailsOnlyItsItem()
+    {
+        _rejected = [];
+        _missing = ["/v1/traces/"];
+        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: true));
+
+        var result = await sdk.RunScenarioAsync("echo", _ => Task.FromResult("answer"), [],
+            [new ScenarioItem { Name = "saved", TraceId = "tr_gone" }, new ScenarioItem { Name = "live", Input = "hi" }]);
+
+        result.Results[0].Failures.Should().ContainSingle().Which.Should().Be("trace 'tr_gone' not found");
+        result.Results[1].Passed.Should().BeTrue();
+        _warnings.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task UnreachableApi_ThrowsWithoutAStatus_WhenLoadingATrace()
+    {
+        var sdk = new VevalSdk(Options("http://127.0.0.1:1", strict: false));
+
+        var act = () => sdk.GetTraceAsync("tr_saved");
+
+        (await act.Should().ThrowAsync<VevalRequestException>()).Which.StatusCode.Should().BeNull();
     }
 }

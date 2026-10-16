@@ -10,6 +10,7 @@ from ._tracing import TraceData, SnapshotData, SnapshotDiff, compare_snapshots, 
 from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
+from ._scenario_report import ScenarioReport
 from ._sdk import VevalSdk, _flatten_steps
 
 T = TypeVar("T")
@@ -159,7 +160,7 @@ class VevalTestSdk(VevalSdk):
     ) -> ScenarioRunResult:
         resolved_items = items or []
         scenario_result = ScenarioRunResult()
-        undelivered = 0
+        report = ScenarioReport(self._client, scenario_name)
 
         for item in resolved_items:
             effective_assertions = scenario_assertions + list(item.assertions)
@@ -188,8 +189,7 @@ class VevalTestSdk(VevalSdk):
                             replay_result.started_at, replay_result.completed_at,
                             extra_meta={"replay": True, "source_trace_id": item.trace_id},
                         )
-                        if not await self._client.send_trace_async(payload, raise_on_failure=False):
-                            undelivered += 1
+                        await report.send_trace_async(payload)
 
             elif item.input is not None:
                 ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", item.input)
@@ -208,20 +208,5 @@ class VevalTestSdk(VevalSdk):
 
             scenario_result.results.append(item_result)
 
-        await self._client.post_scenario_run_async(scenario_name, {
-            "passed": scenario_result.passed,
-            "pass_count": scenario_result.pass_count,
-            "fail_count": scenario_result.fail_count,
-            "results": [
-                {
-                    "name": r.item.name or r.item.trace_id or "item",
-                    "passed": r.passed,
-                    "failures": r.failures,
-                    "judgments": r.context.judgments if r.context else [],
-                }
-                for r in scenario_result.results
-            ],
-        })
-        self._client.raise_if_undelivered(scenario_name, undelivered)
-
+        await report.complete_async(scenario_result, unnamed_item="item")
         return scenario_result

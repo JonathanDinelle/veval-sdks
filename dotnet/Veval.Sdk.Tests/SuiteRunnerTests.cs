@@ -10,26 +10,6 @@ public class ScenarioRunnerTests
         new VevalSdk(new VevalOptions { ApiKey = "test" });
 
     [Fact]
-    public async Task RunScenarioAsync_TraceNotFound_ItemFailsWithNotFound()
-    {
-        var sdk = MakeSdk();
-        var result = await sdk.RunScenarioAsync(
-            "my-scenario",
-            async ctx =>
-            {
-                await ctx.TrackStepAsync("step-one", "hello", () => Task.FromResult("world"));
-                return "world";
-            },
-            scenarioAssertions: new[] { TraceAssert.NoErrors() },
-            items: new[] { new ScenarioItem { TraceId = "tr_scenario_test", Name = "happy path" } }
-        );
-        // trace fetch will fail (no real API) so item fails with "trace not found"
-        result.Results.Should().HaveCount(1);
-        result.Results[0].Item.Name.Should().Be("happy path");
-        result.Results[0].Failures.Should().Contain(f => f.Contains("not found"));
-    }
-
-    [Fact]
     public async Task RunScenarioAsync_ScenarioAssertionAndItemAssertionBothEvaluated()
     {
         var sdk = MakeSdk();

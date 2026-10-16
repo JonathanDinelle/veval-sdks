@@ -141,7 +141,7 @@ public class VevalSdk : IVevalSdk
             .ToArray();
 
         var scenarioResult = new ScenarioRunResult();
-        var undelivered = 0;
+        var report = new ScenarioReport(_client, scenarioName);
 
         foreach (var item in resolvedItems)
         {
@@ -178,14 +178,13 @@ public class VevalSdk : IVevalSdk
                             ["replay"] = true,
                             ["source_trace_id"] = item.TraceId,
                         });
-                    if (!await _client.SendTraceAsync(replayPayload, throwOnFailure: false)) undelivered++;
+                    await report.SendTraceAsync(replayPayload);
                 }
             }
             else if (item.Input != null)
             {
                 // Synthetic item: live run with real LLM
-                var (ctx, delivered) = await RunAndCaptureContextAsync(scenarioName, agent, item.Input);
-                if (!delivered) undelivered++;
+                var ctx = await RunAndCaptureContextAsync(scenarioName, agent, item.Input, report);
                 foreach (var assertion in effectiveAssertions)
                 {
                     var failure = await assertion.EvaluateAsync(ctx);
@@ -201,30 +200,17 @@ public class VevalSdk : IVevalSdk
             scenarioResult.Results.Add(itemResult);
         }
 
-        // Post results to API for trend tracking. Throws only in strict mode (ThrowOnSendFailure).
-        await _client.PostScenarioRunAsync(scenarioName, new
-        {
-            passed = scenarioResult.Passed,
-            pass_count = scenarioResult.PassCount,
-            fail_count = scenarioResult.FailCount,
-            results = scenarioResult.Results.Select(r => new
-            {
-                name = r.Item.Name ?? r.Item.TraceId ?? "synthetic",
-                passed = r.Passed,
-                failures = r.Failures,
-                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
-            }),
-        });
-        _client.ThrowIfUndelivered(scenarioName, undelivered);
+        await report.CompleteAsync(scenarioResult, unnamedItem: "synthetic");
 
         return scenarioResult;
     }
 
-    /// <summary>Runs one synthetic scenario item; returns its context and whether its trace was stored.</summary>
-    private async Task<(VevalExecutionContext Ctx, bool Delivered)> RunAndCaptureContextAsync<T>(
+    /// <summary>Runs one synthetic scenario item, sends its trace through the report, and returns its context.</summary>
+    private async Task<VevalExecutionContext> RunAndCaptureContextAsync<T>(
         string agentName,
         Func<VevalExecutionContext, Task<T>> agent,
-        object? input)
+        object? input,
+        ScenarioReport report)
     {
         var traceId = $"tr_{Guid.NewGuid():N}";
         var ctx = new VevalExecutionContext(traceId, input);
@@ -246,8 +232,8 @@ public class VevalSdk : IVevalSdk
 
         var completedAt = DateTime.UtcNow;
         var payload = BuildPayload(traceId, agentName, ctx, input, output, status, error, startedAt, completedAt);
-        var delivered = await _client.SendTraceAsync(payload, throwOnFailure: false);
-        return (ctx, delivered);
+        await report.SendTraceAsync(payload);
+        return ctx;
     }
 
     internal static object BuildPayload(

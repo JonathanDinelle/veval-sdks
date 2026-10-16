@@ -5,6 +5,7 @@ import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
 import { ITraceAssertion, JudgeResult } from "./assertions";
 import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
+import { ScenarioReport } from "./scenario-report";
 
 export class VevalTestSdk extends VevalSdk {
   private _replayTrace: TraceData | null = null;
@@ -65,41 +66,41 @@ export class VevalTestSdk extends VevalSdk {
     }
 
     const startedAt = new Date();
-    let output: unknown = null;
-    let status = "success";
-    let error: string | null = null;
-
+    let output: T;
     try {
       output = await callback(ctx);
-      this._lastStatus = "success";
-      this._lastError = null;
     } catch (err) {
-      status = "error";
-      error = err instanceof Error ? err.message : String(err);
+      const error = err instanceof Error ? err.message : String(err);
       this._lastStatus = "error";
       this._lastError = error;
-
-      const completedAt = new Date();
-      const extraMeta: Record<string, unknown> = { replay: true };
-      if (this._replayTrace) extraMeta["source_trace_id"] = this._replayTrace.trace_id;
-      const payload = VevalSdk.buildPayload(
-        traceId, agentName, ctx,
-        input ?? null, null, status, error, startedAt, completedAt, extraMeta
-      );
       // The agent's own error takes priority over a failed send (which is still logged).
-      await this.http.sendTraceAsync(payload, false);
+      await this._sendRunTrace(ctx, agentName, input, null, "error", error, startedAt, false);
       throw err;
     }
 
-    const completedAt = new Date();
+    this._lastStatus = "success";
+    this._lastError = null;
+    await this._sendRunTrace(ctx, agentName, input, output, "success", null, startedAt);
+    return output;
+  }
+
+  private async _sendRunTrace(
+    ctx: VevalExecutionContext,
+    agentName: string,
+    input: unknown,
+    output: unknown,
+    status: string,
+    error: string | null,
+    startedAt: Date,
+    throwOnFailure?: boolean
+  ): Promise<void> {
     const extraMeta: Record<string, unknown> = { replay: true };
     if (this._replayTrace) extraMeta["source_trace_id"] = this._replayTrace.trace_id;
     const payload = VevalSdk.buildPayload(
-      traceId, agentName, ctx,
-      input ?? null, output, status, error, startedAt, completedAt, extraMeta
+      ctx.traceId, agentName, ctx,
+      input ?? null, output, status, error, startedAt, new Date(), extraMeta
     );
-    await this.http.sendTraceAsync(payload);
-    return output as T;
+    await this.http.sendTraceAsync(payload, throwOnFailure);
   }
 
   /**
@@ -128,7 +129,7 @@ export class VevalTestSdk extends VevalSdk {
   ): Promise<ScenarioRunResult> {
     const resolvedItems = items ?? [];
     const results: ItemRunResult[] = [];
-    let undelivered = 0;
+    const report = new ScenarioReport(this.http, scenarioName);
 
     for (const item of resolvedItems) {
       const effectiveAssertions = [...scenarioAssertions, ...(item.assertions ?? [])];
@@ -158,7 +159,7 @@ export class VevalTestSdk extends VevalSdk {
               new Date(replayResult.started_at), new Date(replayResult.completed_at),
               { replay: true, source_trace_id: item.trace_id }
             );
-            if (!(await this.http.sendTraceAsync(payload, false))) undelivered++;
+            await report.sendTraceAsync(payload);
           }
         }
       } else if (item.input !== undefined) {
@@ -186,28 +187,6 @@ export class VevalTestSdk extends VevalSdk {
       results.push(itemResult);
     }
 
-    const passCount = results.filter((r) => r.passed).length;
-    const failCount = results.length - passCount;
-    const scenarioResult: ScenarioRunResult = {
-      passed: failCount === 0,
-      pass_count: passCount,
-      fail_count: failCount,
-      results,
-    };
-
-    await this.http.postScenarioRunAsync(scenarioName, {
-      passed: scenarioResult.passed,
-      pass_count: scenarioResult.pass_count,
-      fail_count: scenarioResult.fail_count,
-      results: results.map((r) => ({
-        name: r.item.name ?? r.item.trace_id ?? "item",
-        passed: r.passed,
-        failures: r.failures,
-        judgments: r.context?.judgments ?? [],
-      })),
-    });
-    this.http.throwIfUndelivered(scenarioName, undelivered);
-
-    return scenarioResult;
+    return report.completeAsync(results, "item");
   }
 }

@@ -13,6 +13,7 @@ from ._tracing import (
 from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
+from ._scenario_report import ScenarioReport
 from ._snapshots import save_from_context_payload, save_from_trace_payload, snapshot_run_payload
 
 T = TypeVar("T")
@@ -184,7 +185,7 @@ class VevalSdk:
             resolved_items = items
 
         scenario_result = ScenarioRunResult()
-        undelivered = 0
+        report = ScenarioReport(self._client, scenario_name)
 
         for item in resolved_items:
             effective_assertions = scenario_assertions + list(item.assertions)
@@ -211,13 +212,10 @@ class VevalSdk:
                             replay_result.started_at, replay_result.completed_at,
                             extra_meta={"replay": True, "source_trace_id": item.trace_id},
                         )
-                        if not await self._client.send_trace_async(payload, raise_on_failure=False):
-                            undelivered += 1
+                        await report.send_trace_async(payload)
 
             elif item.input is not None:
-                ctx, delivered = await self._run_and_capture_context(scenario_name, agent, item.input)
-                if not delivered:
-                    undelivered += 1
+                ctx = await self._run_and_capture_context(scenario_name, agent, item.input, report)
                 for assertion in effective_assertions:
                     failure = await assertion.evaluate_async(ctx)
                     if failure:
@@ -228,22 +226,7 @@ class VevalSdk:
 
             scenario_result.results.append(item_result)
 
-        await self._client.post_scenario_run_async(scenario_name, {
-            "passed": scenario_result.passed,
-            "pass_count": scenario_result.pass_count,
-            "fail_count": scenario_result.fail_count,
-            "results": [
-                {
-                    "name": r.item.name or r.item.trace_id or "synthetic",
-                    "passed": r.passed,
-                    "failures": r.failures,
-                    "judgments": r.context.judgments if r.context else [],
-                }
-                for r in scenario_result.results
-            ],
-        })
-        self._client.raise_if_undelivered(scenario_name, undelivered)
-
+        await report.complete_async(scenario_result, unnamed_item="synthetic")
         return scenario_result
 
     async def _run_and_capture_context(
@@ -251,8 +234,9 @@ class VevalSdk:
         agent_name: str,
         agent: Callable[[VevalExecutionContext], Awaitable[T]],
         input: Any,
-    ) -> tuple[VevalExecutionContext, bool]:
-        """Runs one synthetic scenario item; returns its context and whether its trace was stored."""
+        report: ScenarioReport,
+    ) -> VevalExecutionContext:
+        """Runs one synthetic scenario item, sends its trace through the report, and returns its context."""
         trace_id = f"tr_{uuid.uuid4().hex}"
         ctx = VevalExecutionContext(trace_id, input)
         started_at = datetime.now(timezone.utc)
@@ -272,8 +256,8 @@ class VevalSdk:
             trace_id, agent_name, ctx, input, output,
             status, error, started_at, completed_at,
         )
-        delivered = await self._client.send_trace_async(payload, raise_on_failure=False)
-        return ctx, delivered
+        await report.send_trace_async(payload)
+        return ctx
 
     def _build_payload(
         self,

@@ -13,10 +13,22 @@ export class VevalSendError extends Error {
   }
 }
 
+/**
+ * Loading something the SDK needs from Veval failed, such as a scenario's items or a trace to replay. Thrown
+ * whatever throwOnSendFailure says, since the caller can't continue without it.
+ */
+export class VevalRequestError extends Error {
+  constructor(message: string, readonly status: number | null = null) {
+    super(message);
+    this.name = "VevalRequestError";
+  }
+}
+
 export class VevalHttpClient {
   private readonly endpoint: string;
   private readonly apiKey: string;
-  private readonly throwOnSendFailure: boolean;
+
+  readonly throwOnSendFailure: boolean;
 
   constructor(apiKey: string, endpoint: string, throwOnSendFailure = false) {
     this.apiKey = apiKey;
@@ -39,29 +51,41 @@ export class VevalHttpClient {
     return this.sendAsync("Sending trace", `${this.endpoint}/v1/traces`, payload, throwOnFailure);
   }
 
+  /**
+   * Resolves to null only when the trace doesn't exist (404); any other failure throws VevalRequestError, so
+   * a wrong API key or a network error can't look like a missing trace.
+   */
   async getTraceAsync(traceId: string): Promise<TraceData | null> {
-    try {
-      const res = await fetch(`${this.endpoint}/v1/traces/${traceId}`, {
-        headers: this.headers,
-      });
-      if (!res.ok) return null;
-      return (await res.json()) as TraceData;
-    } catch {
-      return null;
-    }
+    return this.getJsonAsync<TraceData>(`Loading trace '${traceId}'`, `${this.endpoint}/v1/traces/${traceId}`, true);
   }
 
-  // Throws on failure — returning an empty list would run zero items and report the scenario as passed.
+  /**
+   * Throws VevalRequestError on failure — returning an empty list would run zero items and report the
+   * scenario as passed.
+   */
   async getScenarioItemsAsync(scenarioName: string): Promise<unknown[]> {
-    const res = await fetch(
-      `${this.endpoint}/v1/scenarios/${encodeURIComponent(scenarioName)}/items`,
-      { headers: this.headers }
+    const body = await this.getJsonAsync<{ items?: unknown[] }>(
+      `Loading items for scenario '${scenarioName}'`,
+      `${this.endpoint}/v1/scenarios/${encodeURIComponent(scenarioName)}/items`
     );
-    if (!res.ok) {
-      throw new Error(`Loading items for scenario '${scenarioName}' failed with status ${res.status}: ${await res.text()}`);
+    return body?.items ?? [];
+  }
+
+  private async getJsonAsync<T>(what: string, url: string, nullOn404 = false): Promise<T | null> {
+    let res: Response;
+    try {
+      res = await fetch(url, { headers: this.headers });
+    } catch (err) {
+      throw new VevalRequestError(`Veval: ${what} failed: ${networkFailureReason(err)}`);
     }
-    const body = (await res.json()) as { items?: unknown[] };
-    return body.items ?? [];
+    if (nullOn404 && res.status === 404) {
+      await res.body?.cancel();
+      return null;
+    }
+    if (!res.ok) {
+      throw new VevalRequestError(`Veval: ${what} failed with status ${res.status}${await reason(res)}`, res.status);
+    }
+    return (await res.json()) as T;
   }
 
   /** Same failure behaviour as sendTraceAsync. */
@@ -73,26 +97,16 @@ export class VevalHttpClient {
     );
   }
 
-  /**
-   * Scenario item traces are sent without throwing, so one failed send can't abort the remaining items; in
-   * strict mode the scenario throws once, after its run is posted.
-   */
-  throwIfUndelivered(scenarioName: string, undelivered: number): void {
-    if (undelivered > 0 && this.throwOnSendFailure) {
-      throw new VevalSendError(
-        `Veval: ${undelivered} trace(s) from scenario '${scenarioName}' could not be stored; see the warnings above`
-      );
-    }
-  }
-
   private async sendAsync(what: string, url: string, payload: unknown, throwOnFailure?: boolean): Promise<boolean> {
     let error: VevalSendError;
     try {
       const res = await fetch(url, { method: "POST", headers: this.headers, body: JSON.stringify(payload) });
-      if (res.ok) return true;
-      const body = (await res.text()).slice(0, 500);
-      const reason = body ? `: ${body}` : "";
-      error = new VevalSendError(`Veval: ${what} failed with status ${res.status}${reason}`, res.status);
+      if (res.ok) {
+        // Release the connection now rather than when the response is garbage-collected.
+        await res.body?.cancel();
+        return true;
+      }
+      error = new VevalSendError(`Veval: ${what} failed with status ${res.status}${await reason(res)}`, res.status);
     } catch (err) {
       error = new VevalSendError(`Veval: ${what} failed: ${networkFailureReason(err)}`);
     }
@@ -126,7 +140,10 @@ export class VevalHttpClient {
     const res = await fetch(`${this.endpoint}/v1/snapshots/${encodeURIComponent(name)}`, {
       headers: this.headers,
     });
-    if (res.status === 404) return null;
+    if (res.status === 404) {
+      await res.body?.cancel();
+      return null;
+    }
     if (!res.ok) {
       throw new Error(`Loading snapshot '${name}' failed with status ${res.status}: ${await res.text()}`);
     }
@@ -147,6 +164,12 @@ export class VevalHttpClient {
     }
     return (await res.json()) as JudgeResult;
   }
+}
+
+/** The response body as ": body", cut to 500 characters, or "" when it's empty. */
+async function reason(res: Response): Promise<string> {
+  const body = (await res.text()).slice(0, 500);
+  return body ? `: ${body}` : "";
 }
 
 /**

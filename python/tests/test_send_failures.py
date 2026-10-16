@@ -7,19 +7,26 @@ import sys
 import threading
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.error import HTTPError
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from veval import ScenarioItem, VevalOptions, VevalSdk, VevalSendError, VevalTestSdk  # noqa: E402
+from veval import (  # noqa: E402
+    ScenarioItem, VevalOptions, VevalRequestError, VevalSdk, VevalSendError, VevalTestSdk,
+)
 
 
 class _Unauthorized(BaseHTTPRequestHandler):
-    # Path prefixes to reject; everything else is accepted.
+    # Path prefixes answered with 404, and path prefixes to reject; everything else is accepted.
+    missing: tuple = ()
     rejected = ("/",)
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.missing and self.path.startswith(self.missing):
+            self.send_response(404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if not self.path.startswith(self.rejected):
             self.send_response(200)
             self.send_header("Content-Length", "0")
@@ -53,8 +60,8 @@ def endpoint(url):
 
 
 @contextmanager
-def unauthorized_api(rejected=("/",)):
-    handler = type("Handler", (_Unauthorized,), {"rejected": rejected})
+def unauthorized_api(rejected=("/",), missing=()):
+    handler = type("Handler", (_Unauthorized,), {"rejected": rejected, "missing": missing})
     server = HTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
@@ -187,10 +194,43 @@ def test_scenario_items_that_cant_be_loaded_raise_even_without_strict_mode():
         sdk = VevalSdk(VevalOptions(api_key="wrong"))
         try:
             asyncio.run(sdk.run_scenario_async("echo", counting, []))
-            raise AssertionError("expected HTTPError")
-        except HTTPError as ex:
-            assert ex.code == 401
+            raise AssertionError("expected VevalRequestError")
+        except VevalRequestError as ex:
+            assert ex.status == 401
+            assert "scenario 'echo'" in str(ex) and "invalid api key" in str(ex)
     assert calls == []
+
+
+def test_traces_that_cant_be_loaded_raise_instead_of_looking_missing():
+    with unauthorized_api(), veval_warnings():
+        sdk = VevalSdk(VevalOptions(api_key="wrong"))
+        try:
+            asyncio.run(sdk.run_scenario_async("echo", answer, [], [ScenarioItem(name="a", trace_id="tr_saved")]))
+            raise AssertionError("expected VevalRequestError")
+        except VevalRequestError as ex:
+            assert ex.status == 401
+            assert "trace 'tr_saved'" in str(ex)
+
+
+def test_a_missing_trace_fails_only_its_item():
+    with unauthorized_api(rejected=(), missing=("/v1/traces/",)), veval_warnings() as logged:
+        sdk = VevalSdk(VevalOptions(api_key="k", raise_on_send_failure=True))
+        items = [ScenarioItem(name="saved", trace_id="tr_gone"), ScenarioItem(name="live", input="hi")]
+        result = asyncio.run(sdk.run_scenario_async("echo", answer, [], items))
+
+    assert result.results[0].failures == ["trace 'tr_gone' not found"]
+    assert result.results[1].passed
+    assert logged == []
+
+
+def test_an_unreachable_api_raises_without_a_status_when_loading_a_trace():
+    with endpoint("http://127.0.0.1:1"):
+        sdk = VevalSdk(VevalOptions(api_key="k"))
+        try:
+            asyncio.run(sdk.get_trace_async("tr_saved"))
+            raise AssertionError("expected VevalRequestError")
+        except VevalRequestError as ex:
+            assert ex.status is None
 
 
 def test_cancelled_test_sdk_run_keeps_its_cancellation():

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { VevalExecutionContext, VevalSdk, VevalSendError, VevalTestSdk } from "../src";
+import { VevalExecutionContext, VevalRequestError, VevalSdk, VevalSendError, VevalTestSdk } from "../src";
 
 // The endpoint is read when the SDK is constructed.
 async function withEndpoint<T>(url: string, body: () => Promise<T>): Promise<T> {
@@ -18,11 +18,16 @@ async function withEndpoint<T>(url: string, body: () => Promise<T>): Promise<T> 
   }
 }
 
-// Rejects requests whose path starts with one of `rejected`; accepts everything else.
-async function withUnauthorizedApi<T>(body: () => Promise<T>, rejected = ["/"]): Promise<T> {
+// Answers 404 to paths starting with one of `missing`, rejects those starting with one of `rejected`, and
+// accepts everything else.
+async function withUnauthorizedApi<T>(body: () => Promise<T>, rejected = ["/"], missing: string[] = []): Promise<T> {
   const server = createServer((req, res) => {
     req.resume();
     req.on("end", () => {
+      if (missing.some((prefix) => req.url!.startsWith(prefix))) {
+        res.writeHead(404).end();
+        return;
+      }
       if (!rejected.some((prefix) => req.url!.startsWith(prefix))) {
         res.writeHead(200).end();
         return;
@@ -72,14 +77,18 @@ test("strict mode throws a rejected trace", async () => {
   }));
 });
 
-test("strict mode throws a network failure", async () => {
-  // A port that was just free; not port 1, which fetch rejects as a "bad port" before connecting.
+// A port that was just free; not a fixed low port like 1 or 9, which fetch rejects as a "bad port" before connecting.
+async function closedPort(): Promise<number> {
   const probe = createServer();
   await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
-  const closedPort = (probe.address() as AddressInfo).port;
+  const port = (probe.address() as AddressInfo).port;
   await new Promise((resolve) => probe.close(resolve));
+  return port;
+}
 
-  const logged = await capturingWarnings(() => withEndpoint(`http://127.0.0.1:${closedPort}`, async () => {
+test("strict mode throws a network failure", async () => {
+  const port = await closedPort();
+  const logged = await capturingWarnings(() => withEndpoint(`http://127.0.0.1:${port}`, async () => {
     const sdk = new VevalSdk({ apiKey: "k", throwOnSendFailure: true });
     await assert.rejects(sdk.runAsync("agent", answer), (err) => err instanceof VevalSendError && err.status === null);
   }));
@@ -139,7 +148,43 @@ test("scenario items that can't be loaded throw, even without strict mode", asyn
 
   await capturingWarnings(() => withUnauthorizedApi(async () => {
     const sdk = new VevalSdk({ apiKey: "wrong" });
-    await assert.rejects(sdk.runScenarioAsync("echo", counting, []), /scenario 'echo'.*401/);
+    await assert.rejects(
+      sdk.runScenarioAsync("echo", counting, []),
+      (err) => err instanceof VevalRequestError && err.status === 401 && /scenario 'echo'.*401.*invalid api key/.test(err.message)
+    );
   }));
   assert.equal(calls, 0);
+});
+
+test("traces that can't be loaded throw instead of looking missing", async () => {
+  await capturingWarnings(() => withUnauthorizedApi(async () => {
+    const sdk = new VevalSdk({ apiKey: "wrong" });
+    await assert.rejects(
+      sdk.runScenarioAsync("echo", answer, [], [{ name: "a", trace_id: "tr_saved", assertions: [] }]),
+      (err) => err instanceof VevalRequestError && err.status === 401 && /trace 'tr_saved'/.test(err.message)
+    );
+  }));
+});
+
+test("a missing trace fails only its item", async () => {
+  const logged = await capturingWarnings(() => withUnauthorizedApi(async () => {
+    const sdk = new VevalSdk({ apiKey: "k", throwOnSendFailure: true });
+    const result = await sdk.runScenarioAsync("echo", answer, [], [
+      { name: "saved", trace_id: "tr_gone", assertions: [] },
+      { name: "live", input: "hi", assertions: [] },
+    ]);
+    assert.deepEqual(result.results[0].failures, ["trace 'tr_gone' not found"]);
+    assert.equal(result.results[1].passed, true);
+  }, [], ["/v1/traces/"]));
+  assert.deepEqual(logged, []);
+});
+
+test("an unreachable API throws without a status when loading a trace", async () => {
+  await withEndpoint(`http://127.0.0.1:${await closedPort()}`, async () => {
+    const sdk = new VevalSdk({ apiKey: "k" });
+    await assert.rejects(
+      sdk.getTraceAsync("tr_saved"),
+      (err) => err instanceof VevalRequestError && err.status === null && /failed: ECONNREFUSED|failed: connect/.test(err.message)
+    );
+  });
 });

@@ -29,34 +29,57 @@ internal class VevalHttpClient : IDisposable
     public Task<bool> SendTraceAsync(object tracePayload, bool? throwOnFailure = null) =>
         SendAsync("Sending trace", $"{_endpoint}/v1/traces", tracePayload, throwOnFailure);
 
-    public async Task<TraceData?> GetTraceAsync(string traceId)
-    {
-        try
-        {
-            var response = await _http.GetAsync($"{_endpoint}/v1/traces/{traceId}");
-            if (!response.IsSuccessStatusCode) return null;
-            var json = await response.Content.ReadAsStringAsync();
-            return JsonSerializer.Deserialize<TraceData>(json);
-        }
-        catch
-        {
-            return null;
-        }
-    }
+    internal bool ThrowOnSendFailure => _throwOnSendFailure;
 
     /// <summary>
-    /// Loads a scenario's items. Throws on failure — returning an empty list would run zero items and
-    /// report the scenario as passed.
+    /// Returns null only when the trace doesn't exist (404); any other failure throws
+    /// <see cref="VevalRequestException"/>, so a wrong API key or a network error can't look like a missing trace.
+    /// </summary>
+    public Task<TraceData?> GetTraceAsync(string traceId) =>
+        GetJsonAsync<TraceData>($"Loading trace '{traceId}'", $"{_endpoint}/v1/traces/{traceId}", nullOn404: true);
+
+    /// <summary>
+    /// Loads a scenario's items. Throws <see cref="VevalRequestException"/> on failure — returning an empty
+    /// list would run zero items and report the scenario as passed.
     /// </summary>
     internal async Task<List<ScenarioItemDto>> GetScenarioItemsAsync(string scenarioName)
     {
-        var response = await _http.GetAsync($"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/items");
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Loading items for scenario '{scenarioName}' failed with status {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
-
-        var result = JsonSerializer.Deserialize<ScenarioItemsResponse>(await response.Content.ReadAsStringAsync());
+        var result = await GetJsonAsync<ScenarioItemsResponse>(
+            $"Loading items for scenario '{scenarioName}'",
+            $"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/items");
         return result?.Items ?? new List<ScenarioItemDto>();
+    }
+
+    private async Task<T?> GetJsonAsync<T>(string what, string url, bool nullOn404 = false) where T : class
+    {
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.GetAsync(url);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            throw new VevalRequestException($"Veval: {what} failed: {ex.Message}", null, ex);
+        }
+
+        using (response)
+        {
+            if (nullOn404 && response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+
+            var status = (int)response.StatusCode;
+            if (!response.IsSuccessStatusCode)
+                throw new VevalRequestException($"Veval: {what} failed with status {status}{await ReasonAsync(response)}", status);
+
+            return JsonSerializer.Deserialize<T>(await response.Content.ReadAsStringAsync());
+        }
+    }
+
+    /// <summary>The response body as ": body", cut to 500 characters, or "" when it's empty.</summary>
+    private static async Task<string> ReasonAsync(HttpResponseMessage response)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        if (body.Length > 500) body = body[..500];
+        return body.Length > 0 ? $": {body}" : "";
     }
 
     /// <summary>Same failure behaviour as <see cref="SendTraceAsync"/>.</summary>
@@ -65,18 +88,6 @@ internal class VevalHttpClient : IDisposable
             $"Posting scenario run '{scenarioName}'",
             $"{_endpoint}/v1/scenarios/{Uri.EscapeDataString(scenarioName)}/runs",
             runPayload, null);
-
-    /// <summary>
-    /// Scenario item traces are sent without throwing, so one failed send can't abort the remaining items;
-    /// in strict mode the scenario throws once, after its run is posted.
-    /// </summary>
-    internal void ThrowIfUndelivered(string scenarioName, int undelivered)
-    {
-        if (undelivered > 0 && _throwOnSendFailure)
-            throw new VevalSendException(
-                $"Veval: {undelivered} trace(s) from scenario '{scenarioName}' could not be stored; see the warnings above",
-                null);
-    }
 
     private async Task<bool> SendAsync(string what, string url, object payload, bool? throwOnFailure)
     {
@@ -87,11 +98,8 @@ internal class VevalHttpClient : IDisposable
             using var response = await _http.PostAsync(url, content);
             if (response.IsSuccessStatusCode) return true;
 
-            var body = await response.Content.ReadAsStringAsync();
-            if (body.Length > 500) body = body[..500];
             var status = (int)response.StatusCode;
-            var reason = body.Length > 0 ? $": {body}" : "";
-            error = new VevalSendException($"Veval: {what} failed with status {status}{reason}", status);
+            error = new VevalSendException($"Veval: {what} failed with status {status}{await ReasonAsync(response)}", status);
         }
         catch (Exception ex)
         {

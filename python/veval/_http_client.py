@@ -4,7 +4,7 @@ import logging
 from typing import Any, Optional
 from urllib.parse import quote
 from urllib.request import Request, urlopen
-from urllib.error import HTTPError, URLError
+from urllib.error import HTTPError
 from ._tracing import TraceData
 from ._snapshots import SnapshotData
 
@@ -20,11 +20,24 @@ class VevalSendError(Exception):
         self.status = status
 
 
+class VevalRequestError(Exception):
+    """Loading something the SDK needs from Veval failed, such as a scenario's items or a trace to
+    replay. Raised whatever raise_on_send_failure says, since the caller can't continue without it."""
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
 class VevalHttpClient:
     def __init__(self, api_key: str, endpoint: str, raise_on_send_failure: bool = False):
         self._api_key = api_key
         self._endpoint = endpoint.rstrip("/")
         self._raise_on_send_failure = raise_on_send_failure
+
+    @property
+    def raise_on_send_failure(self) -> bool:
+        return self._raise_on_send_failure
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -39,24 +52,34 @@ class VevalHttpClient:
         return await self._send_async("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
-        try:
-            import asyncio
-            data = await asyncio.get_running_loop().run_in_executor(
-                None, self._get, f"{self._endpoint}/v1/traces/{trace_id}"
-            )
-            return TraceData.from_dict(data) if data else None
-        except Exception:
-            return None
+        """Returns None only when the trace doesn't exist (404); any other failure raises
+        VevalRequestError, so a wrong API key or a network error can't look like a missing trace."""
+        data = await self._load_async(
+            f"Loading trace '{trace_id}'", f"{self._endpoint}/v1/traces/{trace_id}", none_on_404=True
+        )
+        return TraceData.from_dict(data) if data is not None else None
 
     async def get_scenario_items_async(self, scenario_name: str) -> list[dict]:
-        # Raises on failure — returning an empty list would run zero items and report the
-        # scenario as passed.
-        import asyncio
+        """Raises VevalRequestError on failure — returning an empty list would run zero items and
+        report the scenario as passed."""
         encoded = quote(scenario_name, safe="")
-        data = await asyncio.get_running_loop().run_in_executor(
-            None, self._get_json, f"{self._endpoint}/v1/scenarios/{encoded}/items"
+        data = await self._load_async(
+            f"Loading items for scenario '{scenario_name}'", f"{self._endpoint}/v1/scenarios/{encoded}/items"
         )
         return data.get("items") or []
+
+    async def _load_async(self, what: str, url: str, none_on_404: bool = False) -> Optional[dict]:
+        import asyncio
+        get = self._get_or_none_on_404 if none_on_404 else self._get_json
+        try:
+            return await asyncio.get_running_loop().run_in_executor(None, get, url)
+        except HTTPError as ex:
+            raise VevalRequestError(
+                f"Veval: {what} failed with status {ex.code}{_reason(ex)}", ex.code
+            ) from None
+        except OSError as ex:
+            # URLError (no response) and socket timeouts are both OSErrors.
+            raise VevalRequestError(f"Veval: {what} failed: {getattr(ex, 'reason', ex)}") from ex
 
     async def post_scenario_run_async(self, scenario_name: str, payload: Any) -> None:
         """Same failure behaviour as send_trace_async."""
@@ -66,30 +89,13 @@ class VevalHttpClient:
             f"{self._endpoint}/v1/scenarios/{encoded}/runs", payload, None,
         )
 
-    def raise_if_undelivered(self, scenario_name: str, undelivered: int) -> None:
-        """Scenario item traces are sent without raising, so one failed send can't abort the
-        remaining items; in strict mode the scenario raises once, after its run is posted."""
-        if undelivered and self._raise_on_send_failure:
-            raise VevalSendError(
-                f"Veval: {undelivered} trace(s) from scenario '{scenario_name}' could not be stored; "
-                "see the warnings above"
-            )
-
     async def _send_async(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> bool:
         import asyncio
         try:
             await asyncio.get_running_loop().run_in_executor(None, self._post, url, payload)
             return True
         except HTTPError as ex:
-            try:
-                body = ex.read().decode("utf-8", errors="replace")[:500]
-            except Exception:
-                # The status alone is enough; a body that can't be read mustn't escape the handler.
-                body = ""
-            finally:
-                ex.close()
-            reason = f": {body}" if body else ""
-            error = VevalSendError(f"Veval: {what} failed with status {ex.code}{reason}", ex.code)
+            error = VevalSendError(f"Veval: {what} failed with status {ex.code}{_reason(ex)}", ex.code)
         except Exception as ex:
             error = VevalSendError(f"Veval: {what} failed: {ex}")
 
@@ -127,12 +133,11 @@ class VevalHttpClient:
         return SnapshotData.from_dict(data) if data is not None else None
 
     def _get_or_none_on_404(self, url: str) -> Optional[dict]:
-        req = Request(url, headers=self._headers(), method="GET")
         try:
-            with urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            return self._get_json(url)
         except HTTPError as ex:
             if ex.code == 404:
+                ex.close()
                 return None
             raise
 
@@ -155,10 +160,14 @@ class VevalHttpClient:
         with urlopen(req, timeout=10):
             pass
 
-    def _get(self, url: str) -> Optional[dict]:
-        req = Request(url, headers=self._headers(), method="GET")
-        try:
-            with urlopen(req, timeout=10) as resp:
-                return json.loads(resp.read().decode("utf-8"))
-        except URLError:
-            return None
+
+def _reason(ex: HTTPError) -> str:
+    """The response body as ": body", cut to 500 characters, or "" when it's empty. Closes the response."""
+    try:
+        body = ex.read().decode("utf-8", errors="replace")[:500]
+    except Exception:
+        # The status alone is enough; a body that can't be read mustn't escape the handler.
+        body = ""
+    finally:
+        ex.close()
+    return f": {body}" if body else ""
