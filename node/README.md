@@ -38,7 +38,7 @@ If a trace can't be stored (wrong API key, quota used up, network down), the SDK
 
 ## Testing
 
-`VevalTestSdk` replays recorded traces through your agent code with the recorded outputs served for every step, and `TraceAssert` provides assertions (`noErrors`, `maxSteps`, `judge`, `matchesSnapshot`, …) for replays and scenarios. See the guides at [docs.veval.dev](https://docs.veval.dev).
+`VevalTestSdk` replays recorded traces through your agent code with the recorded outputs served for every step (matched by step name and identical input, reported in `result.fidelity`; a recorded step the agent never calls fails the replay), and `TraceAssert` provides assertions (`noErrors`, `maxSteps`, `judge`, `matchesSnapshot`, …) for replays and scenarios. See the guides at [docs.veval.dev](https://docs.veval.dev).
 
 ## License
 

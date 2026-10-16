@@ -85,6 +85,7 @@ class TraceData:
 
 
 # Snapshot types live in _snapshots; re-exported here for existing imports.
+from ._fidelity import ReplayFidelity  # noqa: E402
 from ._snapshots import (  # noqa: E402
     SnapshotStep,
     SnapshotData,
@@ -99,8 +100,8 @@ class ReplayOptions:
     mock_llm_responses: bool = False
     assertions: list[Any] = field(default_factory=list)
     # When set, the replay also fails if its step sequence or step inputs drifted from the recorded
-    # trace. Recorded outputs are served by step name, so a control-flow change can bind an output to
-    # the wrong call and still pass every assertion — this check catches that.
+    # trace. Without it, a call whose input differs from every recording of that step is still served
+    # (the next unused recording in order) and only reported in ReplayResult.fidelity.
     compare_with_recording: Optional[SnapshotOptions] = None
 
 
@@ -115,6 +116,8 @@ class ReplayResult:
     error: Optional[str] = None
     # How the replay differed from its recording; set when compare_with_recording is on.
     recording_diff: Optional[SnapshotDiff] = None
+    # How each call was bound to the recording; set when mock_llm_responses is on.
+    fidelity: Optional[ReplayFidelity] = None
 
     @property
     def passed(self) -> bool:

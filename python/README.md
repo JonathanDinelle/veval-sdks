@@ -110,6 +110,8 @@ replay = asyncio.run(sdk.replay_async(
 print("Passed" if replay.passed else replay.failures)
 ```
 
+Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `replay.fidelity`. A step with no recording raises instead of calling live, and a recorded step the agent never calls fails the replay.
+
 Store a known-good run — every step with its input and output — and detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered:
 
 ```python

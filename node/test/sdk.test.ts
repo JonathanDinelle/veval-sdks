@@ -78,6 +78,124 @@ test("replay fails when a step has no recording, instead of calling live", async
   assert.match(result.failures[0], /no mock output for step 'unrecorded'/);
 });
 
+test("replay gives reordered calls with the same name their own recordings", async () => {
+  const outputs: unknown[] = [];
+  const result = await sdk().replayAsync(trace(recorded("visit_portal", "portal-a", "a-result", "tool"), recorded("visit_portal", "portal-b", "b-result", "tool")),
+    async (ctx) => {
+      outputs.push(await ctx.trackStepAsync("visit_portal", "portal-b", async () => "live"));
+      outputs.push(await ctx.trackStepAsync("visit_portal", "portal-a", async () => "live"));
+      return "done";
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.passed, true);
+  assert.deepEqual(outputs, ["b-result", "a-result"]);
+  assert.equal(result.fidelity!.is_faithful, true);
+  assert.deepEqual(result.fidelity!.bindings.map((b) => b.recorded_index), [1, 0]);
+});
+
+test("replay fails when a recorded step is never called", async () => {
+  const result = await sdk().replayAsync(trace(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool")),
+    (ctx) => ctx.trackStepAsync("check_gate", "go", async () => "live"),
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0], /never called/);
+  assert.match(result.failures[0], /'visit_portal' \(recorded step 2\)/);
+  assert.deepEqual(result.fidelity!.unused, [{ step_name: "visit_portal", recorded_index: 1 }]);
+});
+
+test("replay fails on an added call instead of running it live", async () => {
+  let liveCalls = 0;
+  const result = await sdk().replayAsync(trace(recorded("visit_portal", "portal-a", "a-result", "tool")),
+    async (ctx) => {
+      await ctx.trackStepAsync("visit_portal", "portal-a", async () => { liveCalls++; return "live"; });
+      await ctx.trackStepAsync("visit_portal", "portal-a", async () => { liveCalls++; return "live"; });
+      return "done";
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.passed, false);
+  assert.match(result.failures[0], /no mock output for step 'visit_portal'/);
+  assert.equal(liveCalls, 0);
+});
+
+test("replay serves an input that changes every run in order and reports it as diverged", async () => {
+  const outputs: unknown[] = [];
+  const result = await sdk().replayAsync(
+    trace(recorded("plan", "Today is 2026-10-01. Plan the day.", "plan-1"), recorded("plan", "Today is 2026-10-01. Revise the plan.", "plan-2")),
+    async (ctx) => {
+      outputs.push(await ctx.trackStepAsync("plan", "Today is 2026-10-16. Plan the day.", async () => "live"));
+      outputs.push(await ctx.trackStepAsync("plan", "Today is 2026-10-16. Revise the plan.", async () => "live"));
+      return "done";
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.passed, true);
+  assert.deepEqual(outputs, ["plan-1", "plan-2"]);
+  assert.equal(result.fidelity!.diverged, 2);
+  assert.equal(result.fidelity!.is_faithful, false);
+  const first = result.fidelity!.bindings[0];
+  assert.deepEqual([first.kind, first.recorded_input, first.actual_input],
+    ["diverged", "Today is 2026-10-01. Plan the day.", "Today is 2026-10-16. Plan the day."]);
+});
+
+test("replay with compare_with_recording fails on a diverged input", async () => {
+  const result = await sdk().replayAsync(trace(recorded("plan", "old prompt", "plan-1")),
+    (ctx) => ctx.trackStepAsync("plan", "new prompt", async () => "live"),
+    { mock_llm_responses: true, assertions: [], compare_with_recording: {} });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0], /drifted from its recording/);
+});
+
+test("replay matches a recorded input regardless of key order", async () => {
+  const recording: TraceData = JSON.parse(JSON.stringify(trace(
+    recorded("visit_portal", { portal: "b", page: 2 }, "b-result", "tool"),
+    recorded("visit_portal", { portal: "a", page: 1 }, "a-result", "tool"))));
+  let output: unknown = null;
+  const result = await sdk().replayAsync(recording,
+    async (ctx) => {
+      output = await ctx.trackStepAsync("visit_portal", { page: 1, portal: "a" }, async () => "live");
+      await ctx.trackStepAsync("visit_portal", { page: 2, portal: "b" }, async () => "live");
+      return "done";
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.passed, true);
+  assert.equal(output, "a-result");
+  assert.equal(result.fidelity!.matched, 2);
+});
+
+test("replay that throws does not also report unused recordings", async () => {
+  const result = await sdk().replayAsync(trace(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool")),
+    async (ctx) => {
+      await ctx.trackStepAsync("check_gate", "go", async () => "live");
+      throw new Error("boom");
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0], /boom/);
+  assert.equal(result.fidelity!.unused.length, 1);
+});
+
+test("withReplay runAsync throws when a recorded step is never called", async () => {
+  const replaying = testSdk().withReplay(trace(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool")));
+  await assert.rejects(
+    replaying.runAsync("agent", (ctx) => ctx.trackStepAsync("check_gate", "go", async () => "live")),
+    /never called.*'visit_portal'/);
+  assert.equal(replaying.lastStatus, "error");
+});
+
+test("replay without mocking has no fidelity", async () => {
+  const result = await sdk().replayAsync(trace(recorded("classify", "hello", "greeting")), async () => "done", { assertions: [] });
+  assert.equal(result.fidelity, null);
+  assert.equal(result.passed, true);
+});
+
 test("withReplay makes the production entry point replay unchanged", async () => {
   const replaying = testSdk().withReplay(trace(recorded("classify", "hello", "greeting")));
   const output = await replaying.runAsync("agent", (ctx) => ctx.trackStepAsync("classify", "hello", async () => "live"));

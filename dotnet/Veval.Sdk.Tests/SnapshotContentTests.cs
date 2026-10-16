@@ -107,7 +107,7 @@ public class SnapshotContentTests
     }
 
     [Fact]
-    public async Task Replay_WithCompareWithRecording_CatchesOutputBoundToWrongCall()
+    public async Task Replay_WithCompareWithRecording_ServesMatchingInputAndFailsOnSkippedCall()
     {
         // Recorded: the same step used twice — classify, then answer.
         var trace = new TraceData
@@ -117,16 +117,16 @@ public class SnapshotContentTests
         };
         var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
 
-        // New code skips classification, so its single call is served the *classification* output.
+        // New code skips classification; its single call has the answer's input, so it gets the answer's output.
         var result = await sdk.ReplayAsync(trace,
             ctx => ctx.TrackStepAsync("call-claude", "Answer: ...", () => Task.FromResult("live")),
             new ReplayOptions { MockLlmResponses = true, CompareWithRecording = new SnapshotOptions() });
 
-        result.Output.Should().Be("category: urgent", "replay binds recorded outputs by step name");
+        result.Output.Should().Be("Here is your briefing.", "replay binds a call to the recording with the same input");
         result.Passed.Should().BeFalse();
-        result.RecordingDiff!.Changes.Should().Contain(c => c.Kind == SnapshotChangeKind.InputChanged)
-            .And.Contain(c => c.Kind == SnapshotChangeKind.Removed);
-        result.Failures.Should().ContainSingle(f => f.Contains("drifted from its recording"));
+        result.RecordingDiff!.Changes.Should().Contain(c => c.Kind == SnapshotChangeKind.Removed);
+        result.Failures.Should().Contain(f => f.Contains("never called") && f.Contains("recorded step 1"))
+            .And.Contain(f => f.Contains("drifted from its recording"));
     }
 
     [Fact]

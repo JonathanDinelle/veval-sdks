@@ -69,6 +69,9 @@ export class VevalTestSdk extends VevalSdk {
     let output: T;
     try {
       output = await callback(ctx);
+      // A recorded step the agent never called fails the run, the same way an unrecorded call does.
+      const unused = this._replayTrace ? ctx.replayFidelity?.unusedFailure(this._replayTrace.trace_id) : null;
+      if (unused) throw new Error(unused);
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       this._lastStatus = "error";

@@ -1,5 +1,7 @@
 import { Step, StepHandle } from "./step";
 import { StepData, TraceData } from "./tracing";
+import { ReplayFidelity } from "./fidelity";
+import { canonicalize } from "./snapshots";
 
 export interface JudgeRecord {
   criteria: string;
@@ -8,13 +10,23 @@ export interface JudgeRecord {
   reasoning: string;
 }
 
+interface RecordedStep {
+  data: StepData;
+  index: number;
+  canonicalInput: string;
+  consumed: boolean;
+}
+
+const NO_IGNORED_FIELDS = new Set<string>();
+
 export class VevalExecutionContext {
   readonly traceId: string;
   readonly input: unknown;
   private _steps: Step[] = [];
   private _metadata: Record<string, unknown> = {};
   private _judgments: JudgeRecord[] = [];
-  private _mockOutputs: Map<string, StepData[]> | null = null;
+  private _recorded: RecordedStep[] | null = null;
+  private _fidelity: ReplayFidelity | null = null;
   private _strictMockMode = false;
 
   constructor(traceId: string, input: unknown) {
@@ -34,6 +46,11 @@ export class VevalExecutionContext {
     return this._judgments;
   }
 
+  /** How each replayed step was bound to the recording; null when the run is not a mocked replay. */
+  get replayFidelity(): ReplayFidelity | null {
+    return this._fidelity;
+  }
+
   setMetadata(key: string, value: unknown): void {
     this._metadata[key] = value;
   }
@@ -47,27 +64,22 @@ export class VevalExecutionContext {
     input: unknown,
     fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>)
   ): Promise<T> {
-    if (this._mockOutputs !== null && this._strictMockMode) {
-      const q = this._mockOutputs.get(name);
-      if (!q || q.length === 0) {
-        const available = [...(this._mockOutputs?.keys() ?? [])].join(", ");
+    if (this._recorded !== null) {
+      const recorded = this.bindRecordedStep(name, input);
+      if (recorded === null && this._strictMockMode) {
+        const available = [...new Set(this._recorded.filter((r) => !r.consumed).map((r) => r.data.name))].join(", ");
         throw new Error(
           `Replay mode: no mock output for step '${name}'. ` +
           `Available steps: ${available}. ` +
           "This would have made a real LLM call."
         );
       }
-    }
-
-    if (this._mockOutputs !== null) {
-      const q = this._mockOutputs.get(name);
-      if (q && q.length > 0) {
-        const recorded = q.shift()!;
-        const mock = recorded.output;
+      if (recorded !== null) {
+        const mock = recorded.data.output;
         const s = new Step(name);
         s.input = input;
         // Keep the recorded type so toolCalled and snapshot types behave the same as in the original run.
-        s.type = recorded.type ?? "custom";
+        s.type = recorded.data.type ?? "custom";
         s.metadata["_source"] = "replay";
         s.complete(mock);
         this._steps.push(s);
@@ -101,13 +113,36 @@ export class VevalExecutionContext {
         "Ensure the trace was recorded with steps before using it for replay."
       );
     }
-    this._mockOutputs = new Map();
     this._strictMockMode = strict;
-    for (const step of trace.steps) {
-      if (!this._mockOutputs.has(step.name)) {
-        this._mockOutputs.set(step.name, []);
-      }
-      this._mockOutputs.get(step.name)!.push(step);
-    }
+    this._recorded = trace.steps.map((data, index) => ({
+      data,
+      index,
+      canonicalInput: canonicalize(data.input, NO_IGNORED_FIELDS),
+      consumed: false,
+    }));
+    this._fidelity = new ReplayFidelity(this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })));
+  }
+
+  /**
+   * Picks the recorded step to serve for a call: among unused recordings with the same name, the one whose
+   * input is identical (key order ignored), otherwise the earliest — which is reported as diverged.
+   */
+  private bindRecordedStep(name: string, input: unknown): RecordedStep | null {
+    const candidates = this._recorded!.filter((r) => !r.consumed && r.data.name === name);
+    if (candidates.length === 0) return null;
+
+    const actual = canonicalize(input, NO_IGNORED_FIELDS);
+    const exact = candidates.find((r) => r.canonicalInput === actual);
+    const recorded = exact ?? candidates[0];
+    recorded.consumed = true;
+
+    this._fidelity!.record({
+      step_name: name,
+      kind: exact ? "matched" : "diverged",
+      recorded_index: recorded.index,
+      recorded_input: recorded.data.input,
+      actual_input: input,
+    });
+    return recorded;
   }
 }

@@ -94,6 +94,11 @@ class VevalTestSdk(VevalSdk):
         started_at = datetime.now(timezone.utc)
         try:
             output = await callback(ctx)
+            # A recorded step the agent never called fails the run, the same way an unrecorded call does.
+            fidelity = ctx.replay_fidelity
+            unused = fidelity._unused_failure(self._replay_trace.trace_id) if self._replay_trace and fidelity else None
+            if unused:
+                raise RuntimeError(unused)
         except Exception as ex:
             self._last_status = "error"
             self._last_error = str(ex)
