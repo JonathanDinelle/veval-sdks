@@ -42,6 +42,7 @@ async def agent(ctx: VevalExecutionContext) -> str:
         handle.set_meta("tokens_in", response.usage.input_tokens)
         handle.set_meta("tokens_out", response.usage.output_tokens)
         handle.set_meta("cost_usd", response.usage.cost)
+        handle.set_meta("type", "llm")
         handle.set_meta("model", "claude-opus-4-6")
         return response.text
 
