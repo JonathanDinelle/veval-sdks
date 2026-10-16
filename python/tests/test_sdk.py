@@ -234,6 +234,30 @@ def test_replay_matches_a_recorded_input_regardless_of_key_order():
     assert result.fidelity.matched == 2
 
 
+def test_replay_matches_dataclass_and_datetime_inputs_in_the_form_they_were_sent():
+    import json
+    from dataclasses import dataclass
+    from datetime import date
+
+    @dataclass
+    class Query:
+        day: date
+
+    first, second = Query(date(2026, 10, 15)), Query(date(2026, 10, 16))
+    as_sent = lambda v: json.loads(json.dumps(v, default=str))  # noqa: E731 — what the trace stores
+    trace = recording(recorded("fetch", as_sent(first), "15th"), recorded("fetch", as_sent(second), "16th"))
+    outputs = []
+
+    async def agent(ctx):
+        outputs.append(await ctx.track_step_async("fetch", second, returning("live")))
+        outputs.append(await ctx.track_step_async("fetch", first, returning("live")))
+        return "done"
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert outputs == ["16th", "15th"]
+    assert result.fidelity.matched == 2
+
+
 def test_replay_that_throws_does_not_also_report_unused_recordings():
     async def agent(ctx):
         await ctx.track_step_async("check_gate", "go", returning("live"))
