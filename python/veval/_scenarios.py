@@ -13,6 +13,11 @@ class ScenarioItem:
     trace_id: Optional[str] = None
     input: Any = None
     assertions: list[ITraceAssertion] = field(default_factory=list)
+    # For a trace-backed item: serve model steps from the recording too (mocked replay) instead of running
+    # them live. Cheaper and deterministic, so it suits code changes, but it can't catch a prompt regression.
+    # VevalTestSdk always replays mocked; for items loaded from the dashboard, pass mock_model_steps=True to
+    # run_scenario_async.
+    mock_model_steps: bool = False
 
 
 @dataclass

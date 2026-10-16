@@ -149,7 +149,9 @@ public class VevalTestSdk : IVevalSdk
         TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
     {
         var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input);
-        if (options.MockLlmResponses)
+        if (options.LiveModelSteps)
+            ctx.LoadMockOutputs(trace, liveModelSteps: true);
+        else if (options.MockLlmResponses)
             ctx.LoadMockOutputs(trace);
 
         var startedAt = DateTime.UtcNow;
@@ -162,8 +164,8 @@ public class VevalTestSdk : IVevalSdk
 
         var failures = new List<string>();
         if (error != null) failures.Add($"Replay threw exception: {error}");
-        // An exception already explains why the rest of the recording went unused.
-        if (error == null && ctx.ReplayFidelity?.UnusedFailure(trace.TraceId) is { } unused) failures.Add(unused);
+        if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
+            failures.Add(bindingFailure);
         foreach (var a in options.Assertions)
         {
             var f = await a.EvaluateAsync(ctx);
@@ -189,7 +191,8 @@ public class VevalTestSdk : IVevalSdk
         string scenarioName,
         Func<VevalExecutionContext, Task<T>> agent,
         ITraceAssertion[] scenarioAssertions,
-        ScenarioItem[]? items = null)
+        ScenarioItem[]? items = null,
+        bool mockModelSteps = false)
     {
         var scenarioResult = new ScenarioRunResult();
         var report = new ScenarioReport(_reportingClient, scenarioName);
@@ -209,6 +212,7 @@ public class VevalTestSdk : IVevalSdk
                 }
                 else
                 {
+                    // The test double never makes live model calls: trace-backed items always replay mocked.
                     var replayResult = await ReplayAsync(trace, agent, new ReplayOptions
                     {
                         MockLlmResponses = true,

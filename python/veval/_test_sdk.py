@@ -162,6 +162,7 @@ class VevalTestSdk(VevalSdk):
         agent: Callable[[VevalExecutionContext], Awaitable[T]],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
+        mock_model_steps: bool = False,
     ) -> ScenarioRunResult:
         resolved_items = items or []
         scenario_result = ScenarioRunResult()
@@ -178,6 +179,7 @@ class VevalTestSdk(VevalSdk):
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
+                        # The test double never makes live model calls: trace-backed items always replay mocked.
                         ReplayOptions(mock_llm_responses=True, assertions=effective_assertions),
                     )
                     item_result.failures.extend(replay_result.failures)

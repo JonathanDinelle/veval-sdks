@@ -16,7 +16,7 @@ export {
   describeChange,
 } from "./snapshots";
 export { ITraceAssertion, TraceAssert, JudgeResult, JudgeableSdk, JudgeOptions, SnapshotSource } from "./assertions";
-export { ScenarioItem, ItemRunResult, ScenarioRunResult } from "./scenarios";
+export { ScenarioItem, ScenarioOptions, ItemRunResult, ScenarioRunResult } from "./scenarios";
 export { VevalHttpClient, VevalSendError, VevalRequestError } from "./http-client";
 export { VevalSdk } from "./sdk";
 export { VevalTestSdk } from "./test-sdk";

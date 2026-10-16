@@ -189,6 +189,8 @@ var result = await veval.RunScenarioAsync(
 Console.WriteLine($"{result.PassCount}/{result.Results.Count} passed");
 ```
 
+A trace-backed item replays live: steps recorded with `SetMeta("type", "llm")` call the model with your current prompt, so a prompt regression fails the item, and every other step returns its recorded output, so tools never reach a real system. Set `MockModelSteps = true` on the item, or pass `mockModelSteps: true` to `RunScenarioAsync` for every item (including ones loaded from the dashboard), for a free, fully mocked replay that checks code changes but can't see prompt changes. `VevalTestSdk` always replays trace-backed items mocked. `ReplayOptions.LiveModelSteps` does the same for `ReplayAsync`.
+
 ## Snapshot Testing
 
 Store a known-good run — every step with its input and output — then detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered.

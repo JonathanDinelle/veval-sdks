@@ -42,6 +42,7 @@ async def agent(ctx: VevalExecutionContext) -> str:
         handle.set_meta("tokens_in", response.usage.input_tokens)
         handle.set_meta("tokens_out", response.usage.output_tokens)
         handle.set_meta("cost_usd", response.usage.cost)
+        handle.set_meta("type", "llm")
         handle.set_meta("model", "claude-opus-4-6")
         return response.text
 
@@ -87,6 +88,8 @@ for r in result.results:
     if not r.passed:
         print(f"  FAIL {r.item.name}: {r.failures}")
 ```
+
+A trace-backed item (`ScenarioItem(trace_id=...)`) replays live: steps recorded with `set_meta("type", "llm")` call the model with your current prompt, so a prompt regression fails the item, and every other step returns its recorded output, so tools never reach a real system. Set `mock_model_steps=True` on the item, or pass `mock_model_steps=True` to `run_scenario_async` for every item (including ones loaded from the dashboard), for a free, fully mocked replay that checks code changes but can't see prompt changes. `VevalTestSdk` always replays trace-backed items mocked. `ReplayOptions(live_model_steps=True)` does the same for `replay_async`.
 
 You can also pull items from the Veval dashboard by omitting `items`:
 

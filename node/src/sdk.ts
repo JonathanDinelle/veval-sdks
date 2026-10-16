@@ -11,7 +11,7 @@ import {
   SnapshotPayloads,
 } from "./snapshots";
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
-import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
+import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 import { ScenarioReport } from "./scenario-report";
 
@@ -19,6 +19,15 @@ import { ScenarioReport } from "./scenario-report";
  * Failure for a trace-backed scenario item whose trace the API returned 404 for. The usual cause is
  * retention deleting a trace that is only referenced from test code.
  */
+/**
+ * How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
+ * the whole scenario opts into mocked replay.
+ */
+export function scenarioReplayOptions(item: ScenarioItem, options: ScenarioOptions | undefined, assertions: ITraceAssertion[]): ReplayOptions {
+  const mocked = !!(options?.mock_model_steps || item.mock_model_steps);
+  return { mock_llm_responses: mocked, live_model_steps: !mocked, assertions };
+}
+
 export function missingTraceMessage(traceId: string): string {
   return (
     `trace '${traceId}' not found — it may have expired under your plan's retention, or the ID or workspace is wrong. ` +
@@ -125,7 +134,9 @@ export class VevalSdk {
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
-    if (options?.mock_llm_responses) {
+    if (options?.live_model_steps) {
+      ctx.loadMockOutputs(trace, true, true);
+    } else if (options?.mock_llm_responses) {
       ctx.loadMockOutputs(trace);
     }
 
@@ -144,9 +155,8 @@ export class VevalSdk {
     const completedAt = new Date();
     const failures: string[] = [];
     if (error) failures.push(`Replay threw exception: ${error}`);
-    // An exception already explains why the rest of the recording went unused.
-    const unused = error ? null : ctx.replayFidelity?.unusedFailure(trace.trace_id);
-    if (unused) failures.push(unused);
+    const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
+    if (bindingFailure) failures.push(bindingFailure);
     for (const assertion of options?.assertions ?? []) {
       const failure = await assertion.evaluate(ctx);
       if (failure) failures.push(failure);
@@ -177,7 +187,8 @@ export class VevalSdk {
     scenarioName: string,
     agent: (ctx: VevalExecutionContext) => Promise<T>,
     scenarioAssertions: ITraceAssertion[],
-    items?: ScenarioItem[]
+    items?: ScenarioItem[],
+    options?: ScenarioOptions
   ): Promise<ScenarioRunResult> {
     const rawItems = items ?? (await this.http.getScenarioItemsAsync(scenarioName)) as ScenarioItem[];
     const results: ItemRunResult[] = [];
@@ -193,10 +204,7 @@ export class VevalSdk {
           itemResult.failures.push(missingTraceMessage(item.trace_id));
           itemResult.passed = false;
         } else {
-          const replayResult = await this.replayAsync(trace, agent, {
-            mock_llm_responses: true,
-            assertions: effectiveAssertions,
-          });
+          const replayResult = await this.replayAsync(trace, agent, scenarioReplayOptions(item, options, effectiveAssertions));
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
           itemResult.context = replayResult.replayed_context ?? undefined;
