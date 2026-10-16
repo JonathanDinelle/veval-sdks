@@ -15,6 +15,17 @@ import { ScenarioItem, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 import { ScenarioReport } from "./scenario-report";
 
+/**
+ * Failure for a trace-backed scenario item whose trace the API returned 404 for. The usual cause is
+ * retention deleting a trace that is only referenced from test code.
+ */
+export function missingTraceMessage(traceId: string): string {
+  return (
+    `trace '${traceId}' not found — it may have expired under your plan's retention, or the ID or workspace is wrong. ` +
+    "Pin it on the trace page in the dashboard to keep it."
+  );
+}
+
 export class VevalSdk {
   protected readonly opts: ResolvedVevalOptions;
   protected readonly http: VevalHttpClient;
@@ -175,7 +186,7 @@ export class VevalSdk {
       if (item.trace_id) {
         const trace = await this.getTraceAsync(item.trace_id);
         if (!trace) {
-          itemResult.failures.push(`trace '${item.trace_id}' not found`);
+          itemResult.failures.push(missingTraceMessage(item.trace_id));
           itemResult.passed = false;
         } else {
           const replayResult = await this.replayAsync(trace, agent, {

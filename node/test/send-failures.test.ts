@@ -167,16 +167,22 @@ test("traces that can't be loaded throw instead of looking missing", async () =>
 });
 
 test("a missing trace fails only its item", async () => {
-  const logged = await capturingWarnings(() => withUnauthorizedApi(async () => {
-    const sdk = new VevalSdk({ apiKey: "k", throwOnSendFailure: true });
-    const result = await sdk.runScenarioAsync("echo", answer, [], [
-      { name: "saved", trace_id: "tr_gone", assertions: [] },
-      { name: "live", input: "hi", assertions: [] },
-    ]);
-    assert.deepEqual(result.results[0].failures, ["trace 'tr_gone' not found"]);
-    assert.equal(result.results[1].passed, true);
-  }, [], ["/v1/traces/"]));
-  assert.deepEqual(logged, []);
+  // VevalTestSdk knows only the withReplay trace, so any other ID is missing.
+  for (const Sdk of [VevalSdk, VevalTestSdk]) {
+    const logged = await capturingWarnings(() => withUnauthorizedApi(async () => {
+      const sdk = new Sdk({ apiKey: "k", throwOnSendFailure: true });
+      const result = await sdk.runScenarioAsync("echo", answer, [], [
+        { name: "saved", trace_id: "tr_gone", assertions: [] },
+        { name: "live", input: "hi", assertions: [] },
+      ]);
+      assert.equal(result.results[0].failures.length, 1);
+      assert.match(result.results[0].failures[0], /^trace 'tr_gone' not found/);
+      assert.match(result.results[0].failures[0], /retention/);
+      assert.doesNotMatch(result.results[0].failures[0], /withReplay/);
+      assert.equal(result.results[1].passed, true);
+    }, [], ["/v1/traces/"]));
+    assert.deepEqual(logged, []);
+  }
 });
 
 test("an unreachable API throws without a status when loading a trace", async () => {

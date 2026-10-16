@@ -204,17 +204,20 @@ public class SendFailureTests : IDisposable
         thrown.Which.StatusCode.Should().Be(401);
     }
 
-    [Fact]
-    public async Task MissingTrace_FailsOnlyItsItem()
+    [Theory]
+    [InlineData(typeof(VevalSdk))]
+    [InlineData(typeof(VevalTestSdk))] // knows only the WithReplay trace, so any other ID is missing
+    public async Task MissingTrace_FailsOnlyItsItem(Type sdkType)
     {
         _rejected = [];
         _missing = ["/v1/traces/"];
-        var sdk = new VevalSdk(Options(UnauthorizedEndpoint, strict: true));
+        var sdk = (IVevalSdk)Activator.CreateInstance(sdkType, Options(UnauthorizedEndpoint, strict: true))!;
 
         var result = await sdk.RunScenarioAsync("echo", _ => Task.FromResult("answer"), [],
             [new ScenarioItem { Name = "saved", TraceId = "tr_gone" }, new ScenarioItem { Name = "live", Input = "hi" }]);
 
-        result.Results[0].Failures.Should().ContainSingle().Which.Should().Be("trace 'tr_gone' not found");
+        result.Results[0].Failures.Should().ContainSingle()
+            .Which.Should().StartWith("trace 'tr_gone' not found").And.Contain("retention").And.NotContain("WithReplay");
         result.Results[1].Passed.Should().BeTrue();
         _warnings.Should().BeEmpty();
     }

@@ -199,7 +199,7 @@ public class VevalTestSdk : IVevalSdk
                 var trace = await GetTraceAsync(item.TraceId);
                 if (trace == null)
                 {
-                    itemResult.Failures.Add($"trace '{item.TraceId}' not found — call WithReplay(trace) before RunScenarioAsync");
+                    itemResult.Failures.Add(VevalSdk.MissingTraceMessage(item.TraceId));
                 }
                 else
                 {

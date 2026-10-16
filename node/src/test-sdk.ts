@@ -1,5 +1,5 @@
 import { VevalOptions } from "./options";
-import { VevalSdk } from "./sdk";
+import { VevalSdk, missingTraceMessage } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
@@ -138,9 +138,7 @@ export class VevalTestSdk extends VevalSdk {
       if (item.trace_id) {
         const trace = await this.getTraceAsync(item.trace_id);
         if (!trace) {
-          itemResult.failures.push(
-            `trace '${item.trace_id}' not found — call withReplay(trace) before runScenarioAsync`
-          );
+          itemResult.failures.push(missingTraceMessage(item.trace_id));
           itemResult.passed = false;
         } else {
           const replayResult = await this.replayAsync(trace, agent, {
