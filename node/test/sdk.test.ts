@@ -169,6 +169,23 @@ test("replay matches a recorded input regardless of key order", async () => {
   assert.equal(result.fidelity!.matched, 2);
 });
 
+test("replay matches Date inputs in the form they were sent", async () => {
+  const asSent = (v: unknown) => JSON.parse(JSON.stringify(v)); // what the trace stores
+  const day15 = { day: new Date("2026-10-15") };
+  const day16 = { day: new Date("2026-10-16") };
+  const outputs: unknown[] = [];
+  const result = await sdk().replayAsync(trace(recorded("fetch", asSent(day15), "15th", "tool"), recorded("fetch", asSent(day16), "16th", "tool")),
+    async (ctx) => {
+      outputs.push(await ctx.trackStepAsync("fetch", day16, async () => "live"));
+      outputs.push(await ctx.trackStepAsync("fetch", day15, async () => "live"));
+      return "done";
+    },
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.deepEqual(outputs, ["16th", "15th"]);
+  assert.equal(result.fidelity!.matched, 2);
+});
+
 test("replay that throws does not also report unused recordings", async () => {
   const result = await sdk().replayAsync(trace(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool")),
     async (ctx) => {

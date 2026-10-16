@@ -1,5 +1,6 @@
 from __future__ import annotations
 import inspect
+import json
 from typing import Any, Callable, Awaitable, Optional, TypeVar, TYPE_CHECKING
 from ._step import Step, StepHandle
 from ._fidelity import DIVERGED, MATCHED, ReplayBinding, ReplayFidelity, UnusedRecording
@@ -9,6 +10,16 @@ if TYPE_CHECKING:
     from ._tracing import StepData, TraceData
 
 _NO_IGNORED_FIELDS: set[str] = set()
+
+
+def _input_key(value: Any) -> str:
+    """Canonical text for matching a call to a recording. The live input is compared in the form it is sent in
+    (json.dumps with default=str), so a dataclass or datetime matches what the trace recorded for it."""
+    try:
+        value = json.loads(json.dumps(value, default=str))
+    except (TypeError, ValueError):
+        pass
+    return _canonicalize(value, _NO_IGNORED_FIELDS)
 
 T = TypeVar("T")
 
@@ -112,7 +123,7 @@ class VevalExecutionContext:
         if not candidates:
             return None
 
-        actual = _canonicalize(input, _NO_IGNORED_FIELDS)
+        actual = _input_key(input)
         exact = next((r for r in candidates if r.canonical_input == actual), None)
         recorded = exact or candidates[0]
         recorded.consumed = True
@@ -128,5 +139,5 @@ class _RecordedStep:
     def __init__(self, data: StepData, index: int):
         self.data = data
         self.index = index
-        self.canonical_input = _canonicalize(data.input, _NO_IGNORED_FIELDS)
+        self.canonical_input = _input_key(data.input)
         self.consumed = False

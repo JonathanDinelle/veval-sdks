@@ -19,6 +19,20 @@ interface RecordedStep {
 
 const NO_IGNORED_FIELDS = new Set<string>();
 
+/**
+ * Canonical text for matching a call to a recording. The live input is compared in the form it is sent in
+ * (JSON.stringify), so a Date or an object with toJSON matches what the trace recorded for it.
+ */
+function inputKey(value: unknown): string {
+  let sent = value;
+  try {
+    sent = value === undefined ? null : JSON.parse(JSON.stringify(value));
+  } catch {
+    // not JSON-serializable (e.g. a cycle): compare as-is
+  }
+  return canonicalize(sent, NO_IGNORED_FIELDS);
+}
+
 export class VevalExecutionContext {
   readonly traceId: string;
   readonly input: unknown;
@@ -117,7 +131,7 @@ export class VevalExecutionContext {
     this._recorded = trace.steps.map((data, index) => ({
       data,
       index,
-      canonicalInput: canonicalize(data.input, NO_IGNORED_FIELDS),
+      canonicalInput: inputKey(data.input),
       consumed: false,
     }));
     this._fidelity = new ReplayFidelity(this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })));
@@ -131,7 +145,7 @@ export class VevalExecutionContext {
     const candidates = this._recorded!.filter((r) => !r.consumed && r.data.name === name);
     if (candidates.length === 0) return null;
 
-    const actual = canonicalize(input, NO_IGNORED_FIELDS);
+    const actual = inputKey(input);
     const exact = candidates.find((r) => r.canonicalInput === actual);
     const recorded = exact ?? candidates[0];
     recorded.consumed = true;

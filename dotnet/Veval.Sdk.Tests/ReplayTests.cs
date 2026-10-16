@@ -253,6 +253,29 @@ public class ReplayTests
         result.Fidelity!.Matched.Should().Be(2);
     }
 
+    private record Query(DateTime Day);
+
+    [Fact]
+    public async Task ReplayAsync_MatchesObjectInputsInTheFormTheyWereSent()
+    {
+        var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
+        var day15 = new Query(new DateTime(2026, 10, 15));
+        var day16 = new Query(new DateTime(2026, 10, 16));
+        JsonElement AsSent(object v) => JsonSerializer.SerializeToElement(v);  // what the trace stores
+        var trace = TraceWith(Recorded("s1", "fetch", AsSent(day15), "15th"), Recorded("s2", "fetch", AsSent(day16), "16th"));
+        var outputs = new List<string>();
+
+        var result = await sdk.ReplayAsync(trace, async ctx =>
+        {
+            outputs.Add(await ctx.TrackStepAsync("fetch", day16, () => Task.FromResult("live")));
+            outputs.Add(await ctx.TrackStepAsync("fetch", day15, () => Task.FromResult("live")));
+            return "done";
+        }, Mocked());
+
+        outputs.Should().Equal("16th", "15th");
+        result.Fidelity!.Matched.Should().Be(2);
+    }
+
     [Fact]
     public async Task ReplayAsync_AgentThrows_DoesNotAlsoReportUnusedRecordings()
     {
