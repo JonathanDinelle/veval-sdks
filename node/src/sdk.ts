@@ -144,6 +144,9 @@ export class VevalSdk {
     const completedAt = new Date();
     const failures: string[] = [];
     if (error) failures.push(`Replay threw exception: ${error}`);
+    // An exception already explains why the rest of the recording went unused.
+    const unused = error ? null : ctx.replayFidelity?.unusedFailure(trace.trace_id);
+    if (unused) failures.push(unused);
     for (const assertion of options?.assertions ?? []) {
       const failure = await assertion.evaluate(ctx);
       if (failure) failures.push(failure);
@@ -161,6 +164,7 @@ export class VevalSdk {
       failures,
       replayed_context: ctx,
       recording_diff: recordingDiff,
+      fidelity: ctx.replayFidelity,
       output,
       started_at: startedAt.toISOString(),
       completed_at: completedAt.toISOString(),

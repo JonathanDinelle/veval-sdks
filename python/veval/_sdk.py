@@ -140,6 +140,10 @@ class VevalSdk:
         failures: list[str] = []
         if error:
             failures.append(f"Replay threw exception: {error}")
+        # An exception already explains why the rest of the recording went unused.
+        unused = None if error or ctx.replay_fidelity is None else ctx.replay_fidelity._unused_failure(trace.trace_id)
+        if unused:
+            failures.append(unused)
         for assertion in options.assertions:
             failure = await assertion.evaluate_async(ctx)
             if failure:
@@ -157,6 +161,7 @@ class VevalSdk:
             failures=failures,
             replayed_context=ctx,
             recording_diff=recording_diff,
+            fidelity=ctx.replay_fidelity,
             output=output,
             started_at=started_at,
             completed_at=completed_at,

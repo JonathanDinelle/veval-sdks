@@ -1,6 +1,7 @@
 import type { SnapshotDiff, SnapshotOptions } from "./snapshots";
 import { VevalExecutionContext } from "./context";
 import { ITraceAssertion } from "./assertions";
+import type { ReplayFidelity } from "./fidelity";
 
 export interface StepData {
   step_id: string;
@@ -43,8 +44,8 @@ export interface ReplayOptions {
   assertions: ITraceAssertion[];
   /**
    * When set, the replay also fails if its step sequence or step inputs drifted from the recorded trace.
-   * Recorded outputs are served by step name, so a control-flow change can bind an output to the wrong
-   * call and still pass every assertion — this check catches that.
+   * Without it, a call whose input differs from every recording of that step is still served (the next
+   * unused recording in order) and only reported in `fidelity`.
    */
   compare_with_recording?: SnapshotOptions;
 }
@@ -60,4 +61,6 @@ export interface ReplayResult {
   error: string | null;
   /** How the replay differed from its recording; set when `compare_with_recording` is on. */
   recording_diff?: SnapshotDiff | null;
+  /** How each call was bound to the recording; set when `mock_llm_responses` is on. */
+  fidelity?: ReplayFidelity | null;
 }

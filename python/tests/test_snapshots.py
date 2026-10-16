@@ -95,7 +95,7 @@ def test_legacy_snapshot_compares_sequence_only():
     assert "legacy snapshot" in diff.summary()
 
 
-def test_replay_compare_with_recording_catches_output_bound_to_wrong_call():
+def test_replay_compare_with_recording_serves_matching_input_and_fails_on_skipped_call():
     sdk = VevalSdk(VevalOptions(api_key="test"))
     trace = TraceData(trace_id="tr_rec", steps=[recorded("call-claude", "Classify", "category: urgent"), recorded("call-claude", "Answer", "briefing")])
 
@@ -105,10 +105,11 @@ def test_replay_compare_with_recording_catches_output_bound_to_wrong_call():
         return await ctx.track_step_async("call-claude", "Answer", live)
 
     result = asyncio.run(sdk.replay_async(trace, agent, ReplayOptions(mock_llm_responses=True, compare_with_recording=SnapshotOptions())))
-    assert result.output == "category: urgent"
+    assert result.output == "briefing"  # bound to the recording with the same input
     assert not result.passed
-    kinds = {c.kind for c in result.recording_diff.changes}
-    assert {"InputChanged", "Removed"} <= kinds
+    assert "Removed" in {c.kind for c in result.recording_diff.changes}
+    assert any("never called" in f and "recorded step 1" in f for f in result.failures)
+    assert any("drifted from its recording" in f for f in result.failures)
 
 
 def test_replay_keeps_recorded_type_so_tool_called_passes():

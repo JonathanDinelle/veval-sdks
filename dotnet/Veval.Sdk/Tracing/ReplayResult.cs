@@ -13,4 +13,7 @@ public class ReplayResult
 
     /// <summary>How the replay differed from its recording; set when <see cref="ReplayOptions.CompareWithRecording"/> is on.</summary>
     public SnapshotDiff? RecordingDiff { get; set; }
+
+    /// <summary>How each call was bound to the recording; set when <see cref="ReplayOptions.MockLlmResponses"/> is on.</summary>
+    public ReplayFidelity? Fidelity { get; set; }
 }

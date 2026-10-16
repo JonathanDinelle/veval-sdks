@@ -135,6 +135,165 @@ def test_replay_fails_when_a_step_has_no_recording_instead_of_calling_live():
     assert "no mock output for step 'unrecorded'" in result.failures[0]
 
 
+def test_replay_gives_reordered_calls_with_the_same_name_their_own_recordings():
+    outputs = []
+
+    async def agent(ctx):
+        outputs.append(await ctx.track_step_async("visit_portal", "portal-b", returning("live")))
+        outputs.append(await ctx.track_step_async("visit_portal", "portal-a", returning("live")))
+        return "done"
+
+    trace = recording(recorded("visit_portal", "portal-a", "a-result", "tool"), recorded("visit_portal", "portal-b", "b-result", "tool"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert result.passed
+    assert outputs == ["b-result", "a-result"]
+    assert result.fidelity.is_faithful
+    assert [b.recorded_index for b in result.fidelity.bindings] == [1, 0]
+
+
+def test_replay_fails_when_a_recorded_step_is_never_called():
+    async def agent(ctx):
+        return await ctx.track_step_async("check_gate", "go", returning("live"))
+
+    trace = recording(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert not result.passed
+    assert len(result.failures) == 1
+    assert "never called" in result.failures[0]
+    assert "'visit_portal' (recorded step 2)" in result.failures[0]
+    assert [(u.step_name, u.recorded_index) for u in result.fidelity.unused] == [("visit_portal", 1)]
+
+
+def test_replay_fails_on_an_added_call_instead_of_running_it_live():
+    live_calls = []
+
+    async def live():
+        live_calls.append(True)
+        return "live"
+
+    async def agent(ctx):
+        await ctx.track_step_async("visit_portal", "portal-a", live)
+        await ctx.track_step_async("visit_portal", "portal-a", live)
+        return "done"
+
+    trace = recording(recorded("visit_portal", "portal-a", "a-result", "tool"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert not result.passed
+    assert "no mock output for step 'visit_portal'" in result.failures[0]
+    assert live_calls == []
+
+
+def test_replay_serves_an_input_that_changes_every_run_in_order_and_reports_it_as_diverged():
+    outputs = []
+
+    async def agent(ctx):
+        outputs.append(await ctx.track_step_async("plan", "Today is 2026-10-16. Plan the day.", returning("live")))
+        outputs.append(await ctx.track_step_async("plan", "Today is 2026-10-16. Revise the plan.", returning("live")))
+        return "done"
+
+    trace = recording(recorded("plan", "Today is 2026-10-01. Plan the day.", "plan-1"),
+                      recorded("plan", "Today is 2026-10-01. Revise the plan.", "plan-2"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert result.passed
+    assert outputs == ["plan-1", "plan-2"]
+    assert result.fidelity.diverged == 2
+    assert not result.fidelity.is_faithful
+    first = result.fidelity.bindings[0]
+    assert (first.kind, first.recorded_input, first.actual_input) == (
+        "diverged", "Today is 2026-10-01. Plan the day.", "Today is 2026-10-16. Plan the day.")
+
+
+def test_replay_with_compare_with_recording_fails_on_a_diverged_input():
+    from veval import SnapshotOptions
+
+    async def agent(ctx):
+        return await ctx.track_step_async("plan", "new prompt", returning("live"))
+
+    trace = recording(recorded("plan", "old prompt", "plan-1"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True, compare_with_recording=SnapshotOptions())))
+    assert not result.passed
+    assert len(result.failures) == 1
+    assert "drifted from its recording" in result.failures[0]
+
+
+def test_replay_matches_a_recorded_input_regardless_of_key_order():
+    trace = TraceData.from_dict({"trace_id": "tr_json", "steps": [
+        {"step_id": "s1", "name": "visit_portal", "input": {"portal": "b", "page": 2}, "output": "b-result"},
+        {"step_id": "s2", "name": "visit_portal", "input": {"portal": "a", "page": 1}, "output": "a-result"},
+    ]})
+    outputs = []
+
+    async def agent(ctx):
+        outputs.append(await ctx.track_step_async("visit_portal", {"page": 1, "portal": "a"}, returning("live")))
+        await ctx.track_step_async("visit_portal", {"page": 2, "portal": "b"}, returning("live"))
+        return "done"
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert result.passed
+    assert outputs == ["a-result"]
+    assert result.fidelity.matched == 2
+
+
+def test_replay_matches_dataclass_and_datetime_inputs_in_the_form_they_were_sent():
+    import json
+    from dataclasses import dataclass
+    from datetime import date
+
+    @dataclass
+    class Query:
+        day: date
+
+    first, second = Query(date(2026, 10, 15)), Query(date(2026, 10, 16))
+    as_sent = lambda v: json.loads(json.dumps(v, default=str))  # noqa: E731 — what the trace stores
+    trace = recording(recorded("fetch", as_sent(first), "15th"), recorded("fetch", as_sent(second), "16th"))
+    outputs = []
+
+    async def agent(ctx):
+        outputs.append(await ctx.track_step_async("fetch", second, returning("live")))
+        outputs.append(await ctx.track_step_async("fetch", first, returning("live")))
+        return "done"
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert outputs == ["16th", "15th"]
+    assert result.fidelity.matched == 2
+
+
+def test_replay_that_throws_does_not_also_report_unused_recordings():
+    async def agent(ctx):
+        await ctx.track_step_async("check_gate", "go", returning("live"))
+        raise RuntimeError("boom")
+
+    trace = recording(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool"))
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(mock_llm_responses=True)))
+    assert len(result.failures) == 1
+    assert "boom" in result.failures[0]
+    assert len(result.fidelity.unused) == 1
+
+
+def test_with_replay_run_async_raises_when_a_recorded_step_is_never_called():
+    replaying = make_test_sdk().with_replay(
+        recording(recorded("check_gate", "go", "open"), recorded("visit_portal", "portal-a", "a-result", "tool")))
+
+    async def agent(ctx):
+        return await ctx.track_step_async("check_gate", "go", returning("live"))
+
+    try:
+        asyncio.run(replaying.run_async("agent", agent))
+        raise AssertionError("expected the run to fail")
+    except RuntimeError as ex:
+        assert "never called" in str(ex) and "'visit_portal'" in str(ex)
+    assert replaying.last_status == "error"
+
+
+def test_replay_without_mocking_has_no_fidelity():
+    async def agent(ctx):
+        return "done"
+
+    result = asyncio.run(sdk().replay_async(recording(recorded("classify", "hello", "greeting")), agent, ReplayOptions()))
+    assert result.fidelity is None
+    assert result.passed
+
+
 def test_with_replay_makes_the_production_entry_point_replay_unchanged():
     replaying = make_test_sdk().with_replay(recording(recorded("classify", "hello", "greeting")))
 

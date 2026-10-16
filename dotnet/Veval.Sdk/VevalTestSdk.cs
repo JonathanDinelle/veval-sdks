@@ -70,6 +70,9 @@ public class VevalTestSdk : IVevalSdk
         try
         {
             output = await callback(ctx);
+            // A recorded step the agent never called fails the run, the same way an unrecorded call does.
+            if (_replayTrace != null && ctx.ReplayFidelity?.UnusedFailure(_replayTrace.TraceId) is { } unused)
+                throw new InvalidOperationException(unused);
         }
         catch (Exception ex)
         {
@@ -159,6 +162,8 @@ public class VevalTestSdk : IVevalSdk
 
         var failures = new List<string>();
         if (error != null) failures.Add($"Replay threw exception: {error}");
+        // An exception already explains why the rest of the recording went unused.
+        if (error == null && ctx.ReplayFidelity?.UnusedFailure(trace.TraceId) is { } unused) failures.Add(unused);
         foreach (var a in options.Assertions)
         {
             var f = await a.EvaluateAsync(ctx);
@@ -176,6 +181,7 @@ public class VevalTestSdk : IVevalSdk
             Status = status,
             Error = error,
             RecordingDiff = recordingDiff,
+            Fidelity = ctx.ReplayFidelity,
         };
     }
 

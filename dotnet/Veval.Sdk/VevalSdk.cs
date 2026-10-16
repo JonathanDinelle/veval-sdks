@@ -108,6 +108,8 @@ public class VevalSdk : IVevalSdk
 
         var failures = new List<string>();
         if (error != null) failures.Add($"Replay threw exception: {error}");
+        // An exception already explains why the rest of the recording went unused.
+        if (error == null && ctx.ReplayFidelity?.UnusedFailure(trace.TraceId) is { } unused) failures.Add(unused);
         foreach (var assertion in options.Assertions)
         {
             var failure = await assertion.EvaluateAsync(ctx);
@@ -126,6 +128,7 @@ public class VevalSdk : IVevalSdk
             Status = status,
             Error = error,
             RecordingDiff = recordingDiff,
+            Fidelity = ctx.ReplayFidelity,
         };
     }
 

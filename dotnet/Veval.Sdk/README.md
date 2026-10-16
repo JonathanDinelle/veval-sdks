@@ -138,7 +138,7 @@ if (!result.Passed)
         Console.WriteLine($"FAIL: {failure}");
 ```
 
-In replay, `TrackStepAsync` returns the recorded output instead of running your code. A step with no recorded output throws rather than silently making a live call. To replay your production entry point unchanged, use `new VevalTestSdk(options).WithReplay(trace)` and call your agent as usual.
+In replay, `TrackStepAsync` returns the recorded output instead of running your code. Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `result.Fidelity`. A step with no recorded output throws rather than silently making a live call, and a recorded step the agent never calls fails the replay. To replay your production entry point unchanged, use `new VevalTestSdk(options).WithReplay(trace)` and call your agent as usual.
 
 ### Built-in Assertions
 

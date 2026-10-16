@@ -141,7 +141,7 @@ function normalizeJson(value: unknown, ignore: Set<string>): unknown {
 }
 
 /** Canonical text for a step input/output: sorted keys, ignored fields dropped, strings as-is. */
-function canonicalize(value: unknown, ignore: Set<string>): string {
+export function canonicalize(value: unknown, ignore: Set<string>): string {
   if (value === null || value === undefined) return "null";
   if (typeof value === "string") return value;
   return JSON.stringify(normalizeJson(value, ignore), null, 2);

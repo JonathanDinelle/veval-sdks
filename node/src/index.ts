@@ -2,6 +2,7 @@ export { VevalOptions, ResolvedVevalOptions, resolveOptions } from "./options";
 export { Step, StepHandle } from "./step";
 export { VevalExecutionContext, JudgeRecord } from "./context";
 export { StepData, TraceData, ReplayOptions, ReplayResult } from "./tracing";
+export { ReplayFidelity, ReplayBinding, ReplayBindingKind, UnusedRecording } from "./fidelity";
 export {
   SnapshotStep,
   SnapshotData,

@@ -68,16 +68,17 @@ test("a legacy names-only snapshot compares the sequence only, and says so", asy
   assert.match(diff.summary(), /legacy snapshot/);
 });
 
-test("compare_with_recording catches a recorded output bound to the wrong call", async () => {
+test("compare_with_recording: a call gets the recording with its input, and a skipped call fails", async () => {
   const recording = { trace_id: "tr_rec", input: null, steps: [recorded("call-claude", "Classify", "category: urgent"), recorded("call-claude", "Answer", "briefing")] };
   const result = await sdk().replayAsync(recording as never,
     (ctx) => ctx.trackStepAsync("call-claude", "Answer", async () => "live"),
     { mock_llm_responses: true, assertions: [], compare_with_recording: {} });
 
-  assert.equal(result.output, "category: urgent", "replay binds recorded outputs by step name");
+  assert.equal(result.output, "briefing", "replay binds a call to the recording with the same input");
   assert.equal(result.passed, false);
-  const kinds = result.recording_diff!.changes.map((c) => c.kind);
-  assert.ok(kinds.includes("InputChanged") && kinds.includes("Removed"));
+  assert.ok(result.recording_diff!.changes.some((c) => c.kind === "Removed"));
+  assert.ok(result.failures.some((f) => /never called/.test(f) && /recorded step 1/.test(f)));
+  assert.ok(result.failures.some((f) => /drifted from its recording/.test(f)));
 });
 
 test("replayed steps keep their recorded type, so toolCalled passes", async () => {
