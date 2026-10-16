@@ -122,7 +122,9 @@ class VevalSdk:
     ) -> ReplayResult:
         options = options or ReplayOptions()
         ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
-        if options.mock_llm_responses:
+        if options.live_model_steps:
+            ctx.load_mock_outputs(trace, live_model_steps=True)
+        elif options.mock_llm_responses:
             ctx.load_mock_outputs(trace)
 
         started_at = datetime.now(timezone.utc)
@@ -140,10 +142,15 @@ class VevalSdk:
         failures: list[str] = []
         if error:
             failures.append(f"Replay threw exception: {error}")
-        # An exception already explains why the rest of the recording went unused.
-        unused = None if error or ctx.replay_fidelity is None else ctx.replay_fidelity._unused_failure(trace.trace_id)
-        if unused:
-            failures.append(unused)
+        # An exception already explains why the rest of the recording went unused or nothing ran live.
+        # A live model may legitimately take a different path, so unused recordings fail mocked replays only.
+        fidelity = ctx.replay_fidelity
+        binding_failure = None
+        if not error and fidelity is not None:
+            binding_failure = (fidelity._no_live_step_failure(trace.trace_id) if options.live_model_steps
+                               else fidelity._unused_failure(trace.trace_id))
+        if binding_failure:
+            failures.append(binding_failure)
         for assertion in options.assertions:
             failure = await assertion.evaluate_async(ctx)
             if failure:
@@ -203,7 +210,9 @@ class VevalSdk:
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
-                        ReplayOptions(mock_llm_responses=True, assertions=effective_assertions),
+                        # Model steps run live and tools are served from the recording, unless the item opts into mocked replay.
+                        ReplayOptions(mock_llm_responses=item.mock_model_steps, live_model_steps=not item.mock_model_steps,
+                                      assertions=effective_assertions),
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.context = replay_result.replayed_context

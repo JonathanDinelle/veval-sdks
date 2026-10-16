@@ -178,7 +178,8 @@ class VevalTestSdk(VevalSdk):
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
-                        ReplayOptions(mock_llm_responses=True, assertions=effective_assertions),
+                        ReplayOptions(mock_llm_responses=item.mock_model_steps, live_model_steps=not item.mock_model_steps,
+                                      assertions=effective_assertions),
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.context = replay_result.replayed_context

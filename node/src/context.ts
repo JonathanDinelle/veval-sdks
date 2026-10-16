@@ -28,6 +28,7 @@ export class VevalExecutionContext {
   private _recorded: RecordedStep[] | null = null;
   private _fidelity: ReplayFidelity | null = null;
   private _strictMockMode = false;
+  private _liveModelSteps = false;
 
   constructor(traceId: string, input: unknown) {
     this.traceId = traceId;
@@ -65,16 +66,33 @@ export class VevalExecutionContext {
     fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>)
   ): Promise<T> {
     if (this._recorded !== null) {
-      const recorded = this.bindRecordedStep(name, input);
-      if (recorded === null && this._strictMockMode) {
+      const { recorded, exact } = this.findRecording(name, input);
+      // In live mode a model step runs for real, including extra calls of a step recorded as a model step.
+      const runLive = this._liveModelSteps && (recorded?.data.type ?? this.recordedTypeOf(name)) === "llm";
+
+      if (recorded === null && !runLive && this._strictMockMode) {
         const available = [...new Set(this._recorded.filter((r) => !r.consumed).map((r) => r.data.name))].join(", ");
         throw new Error(
-          `Replay mode: no mock output for step '${name}'. ` +
-          `Available steps: ${available}. ` +
-          "This would have made a real LLM call."
+          this._liveModelSteps
+            ? `Live replay: step '${name}' has no recording to serve, and only steps recorded as 'llm' run live. ` +
+              `Available steps: ${available}. Running it could have reached a real system.`
+            : `Replay mode: no mock output for step '${name}'. ` +
+              `Available steps: ${available}. ` +
+              "This would have made a real LLM call."
         );
       }
-      if (recorded !== null) {
+      if (recorded !== null) recorded.consumed = true;
+
+      if (runLive) {
+        this._fidelity!.record({
+          step_name: name, kind: "live", recorded_index: recorded?.index ?? null,
+          recorded_input: recorded?.data.input ?? null, actual_input: input,
+        });
+      } else if (recorded !== null) {
+        this._fidelity!.record({
+          step_name: name, kind: exact ? "matched" : "diverged", recorded_index: recorded.index,
+          recorded_input: recorded.data.input, actual_input: input,
+        });
         const mock = recorded.data.output;
         const s = new Step(name);
         s.input = input;
@@ -106,7 +124,8 @@ export class VevalExecutionContext {
     }
   }
 
-  loadMockOutputs(trace: TraceData, strict = true): void {
+  /** `liveModelSteps`: run steps recorded as `llm` for real and serve every other step from the recording. */
+  loadMockOutputs(trace: TraceData, strict = true, liveModelSteps = false): void {
     if (!trace.steps || trace.steps.length === 0) {
       throw new Error(
         `Replay trace '${trace.trace_id}' has no steps. Cannot mock LLM calls. ` +
@@ -114,6 +133,7 @@ export class VevalExecutionContext {
       );
     }
     this._strictMockMode = strict;
+    this._liveModelSteps = liveModelSteps;
     this._recorded = trace.steps.map((data, index) => ({
       data,
       index,
@@ -124,25 +144,20 @@ export class VevalExecutionContext {
   }
 
   /**
-   * Picks the recorded step to serve for a call: among unused recordings with the same name, the one whose
-   * input is identical (key order ignored), otherwise the earliest — which is reported as diverged.
+   * Picks the recorded step for a call: among unused recordings with the same name, the one whose input is
+   * identical (key order ignored), otherwise the earliest — which is reported as diverged.
    */
-  private bindRecordedStep(name: string, input: unknown): RecordedStep | null {
+  private findRecording(name: string, input: unknown): { recorded: RecordedStep | null; exact: boolean } {
     const candidates = this._recorded!.filter((r) => !r.consumed && r.data.name === name);
-    if (candidates.length === 0) return null;
+    if (candidates.length === 0) return { recorded: null, exact: false };
 
     const actual = canonicalize(input, NO_IGNORED_FIELDS);
-    const exact = candidates.find((r) => r.canonicalInput === actual);
-    const recorded = exact ?? candidates[0];
-    recorded.consumed = true;
+    const match = candidates.find((r) => r.canonicalInput === actual);
+    return { recorded: match ?? candidates[0], exact: match !== undefined };
+  }
 
-    this._fidelity!.record({
-      step_name: name,
-      kind: exact ? "matched" : "diverged",
-      recorded_index: recorded.index,
-      recorded_input: recorded.data.input,
-      actual_input: input,
-    });
-    return recorded;
+  /** The recorded type of a step name, used and unused alike; null when the trace never recorded it. */
+  private recordedTypeOf(name: string): string | null {
+    return this._recorded!.find((r) => r.data.name === name)?.data.type ?? null;
   }
 }

@@ -40,7 +40,17 @@ export interface TraceData {
 }
 
 export interface ReplayOptions {
+  /**
+   * Serve every step's recorded output instead of running it. Deterministic and free, so it checks control
+   * flow and code changes; it can't detect a prompt regression, because model calls return the old outputs.
+   */
   mock_llm_responses: boolean;
+  /**
+   * Run steps recorded as `llm` for real and serve every other step (tools, untyped steps) from the
+   * recording, so a prompt change shows up while tools never reach a real system. Takes precedence over
+   * `mock_llm_responses`. The replay fails if no step ran live.
+   */
+  live_model_steps?: boolean;
   assertions: ITraceAssertion[];
   /**
    * When set, the replay also fails if its step sequence or step inputs drifted from the recorded trace.

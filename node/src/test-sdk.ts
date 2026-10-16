@@ -145,7 +145,8 @@ export class VevalTestSdk extends VevalSdk {
           itemResult.passed = false;
         } else {
           const replayResult = await this.replayAsync(trace, agent, {
-            mock_llm_responses: true,
+            mock_llm_responses: !!item.mock_model_steps,
+            live_model_steps: !item.mock_model_steps,
             assertions: effectiveAssertions,
           } as ReplayOptions);
           itemResult.failures.push(...replayResult.failures);

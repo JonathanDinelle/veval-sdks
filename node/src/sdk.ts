@@ -125,7 +125,9 @@ export class VevalSdk {
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
-    if (options?.mock_llm_responses) {
+    if (options?.live_model_steps) {
+      ctx.loadMockOutputs(trace, true, true);
+    } else if (options?.mock_llm_responses) {
       ctx.loadMockOutputs(trace);
     }
 
@@ -144,9 +146,12 @@ export class VevalSdk {
     const completedAt = new Date();
     const failures: string[] = [];
     if (error) failures.push(`Replay threw exception: ${error}`);
-    // An exception already explains why the rest of the recording went unused.
-    const unused = error ? null : ctx.replayFidelity?.unusedFailure(trace.trace_id);
-    if (unused) failures.push(unused);
+    // An exception already explains why the rest of the recording went unused or nothing ran live.
+    // A live model may legitimately take a different path, so unused recordings fail mocked replays only.
+    const fidelity = ctx.replayFidelity;
+    const bindingFailure = error || !fidelity ? null
+      : options?.live_model_steps ? fidelity.noLiveStepFailure(trace.trace_id) : fidelity.unusedFailure(trace.trace_id);
+    if (bindingFailure) failures.push(bindingFailure);
     for (const assertion of options?.assertions ?? []) {
       const failure = await assertion.evaluate(ctx);
       if (failure) failures.push(failure);
@@ -193,8 +198,10 @@ export class VevalSdk {
           itemResult.failures.push(missingTraceMessage(item.trace_id));
           itemResult.passed = false;
         } else {
+          // Model steps run live and tools are served from the recording, unless the item opts into mocked replay.
           const replayResult = await this.replayAsync(trace, agent, {
-            mock_llm_responses: true,
+            mock_llm_responses: !!item.mock_model_steps,
+            live_model_steps: !item.mock_model_steps,
             assertions: effectiveAssertions,
           });
           itemResult.failures.push(...replayResult.failures);

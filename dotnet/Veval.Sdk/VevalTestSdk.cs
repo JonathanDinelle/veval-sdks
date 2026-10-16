@@ -149,7 +149,9 @@ public class VevalTestSdk : IVevalSdk
         TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
     {
         var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input);
-        if (options.MockLlmResponses)
+        if (options.LiveModelSteps)
+            ctx.LoadMockOutputs(trace, liveModelSteps: true);
+        else if (options.MockLlmResponses)
             ctx.LoadMockOutputs(trace);
 
         var startedAt = DateTime.UtcNow;
@@ -162,8 +164,11 @@ public class VevalTestSdk : IVevalSdk
 
         var failures = new List<string>();
         if (error != null) failures.Add($"Replay threw exception: {error}");
-        // An exception already explains why the rest of the recording went unused.
-        if (error == null && ctx.ReplayFidelity?.UnusedFailure(trace.TraceId) is { } unused) failures.Add(unused);
+        // An exception already explains why the rest of the recording went unused or nothing ran live.
+        // A live model may legitimately take a different path, so unused recordings fail mocked replays only.
+        if (error == null && ctx.ReplayFidelity is { } fidelity
+            && (options.LiveModelSteps ? fidelity.NoLiveStepFailure(trace.TraceId) : fidelity.UnusedFailure(trace.TraceId)) is { } bindingFailure)
+            failures.Add(bindingFailure);
         foreach (var a in options.Assertions)
         {
             var f = await a.EvaluateAsync(ctx);
@@ -211,7 +216,8 @@ public class VevalTestSdk : IVevalSdk
                 {
                     var replayResult = await ReplayAsync(trace, agent, new ReplayOptions
                     {
-                        MockLlmResponses = true,
+                        MockLlmResponses = item.MockModelSteps,
+                        LiveModelSteps = !item.MockModelSteps,
                         Assertions = effectiveAssertions,
                     });
                     itemResult.Failures.AddRange(replayResult.Failures);

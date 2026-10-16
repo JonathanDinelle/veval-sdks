@@ -97,12 +97,18 @@ from ._snapshots import (  # noqa: E402
 
 @dataclass
 class ReplayOptions:
+    # Serve every step's recorded output instead of running it. Deterministic and free, so it checks control
+    # flow and code changes; it can't detect a prompt regression, because model calls return the old outputs.
     mock_llm_responses: bool = False
     assertions: list[Any] = field(default_factory=list)
     # When set, the replay also fails if its step sequence or step inputs drifted from the recorded
     # trace. Without it, a call whose input differs from every recording of that step is still served
     # (the next unused recording in order) and only reported in ReplayResult.fidelity.
     compare_with_recording: Optional[SnapshotOptions] = None
+    # Run steps recorded as llm for real and serve every other step (tools, untyped steps) from the
+    # recording, so a prompt change shows up while tools never reach a real system. Takes precedence over
+    # mock_llm_responses. The replay fails if no step ran live.
+    live_model_steps: bool = False
 
 
 @dataclass

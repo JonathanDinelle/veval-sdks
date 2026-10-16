@@ -88,6 +88,8 @@ for r in result.results:
         print(f"  FAIL {r.item.name}: {r.failures}")
 ```
 
+A trace-backed item (`ScenarioItem(trace_id=...)`) replays live: steps recorded with `set_meta("type", "llm")` call the model with your current prompt, so a prompt regression fails the item, and every other step returns its recorded output, so tools never reach a real system. Set `mock_model_steps=True` on the item for a free, fully mocked replay that checks code changes but can't see prompt changes. `ReplayOptions(live_model_steps=True)` does the same for `replay_async`.
+
 You can also pull items from the Veval dashboard by omitting `items`:
 
 ```python

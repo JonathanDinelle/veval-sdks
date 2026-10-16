@@ -3,13 +3,15 @@ export type ReplayBindingKind =
   /** Served the recorded step with the same name and an identical input. */
   | "matched"
   /** No recorded step with that name had an identical input; served the next unused one in recorded order. */
-  | "diverged";
+  | "diverged"
+  /** A model step that ran for real in a live replay (`live_model_steps`). */
+  | "live";
 
-/** One replayed call and the recorded step that served it. */
+/** One replayed call and the recorded step bound to it. `recorded_index` is null for a live model call beyond the ones recorded. */
 export interface ReplayBinding {
   step_name: string;
   kind: ReplayBindingKind;
-  recorded_index: number;
+  recorded_index: number | null;
   recorded_input: unknown;
   actual_input: unknown;
 }
@@ -51,6 +53,12 @@ export class ReplayFidelity {
     return this._bindings.filter((b) => b.kind === "diverged").length;
   }
 
+  /** Model steps that ran for real in a live replay. */
+  get live(): number {
+    return this._bindings.filter((b) => b.kind === "live").length;
+  }
+
+  /** No call diverged and every recorded step was called. Live calls don't count against it. */
   get is_faithful(): boolean {
     return this.diverged === 0 && this._unused.length === 0;
   }
@@ -58,7 +66,8 @@ export class ReplayFidelity {
   /** @internal */
   record(binding: ReplayBinding): void {
     this._bindings.push(binding);
-    this._unused = this._unused.filter((u) => u.recorded_index !== binding.recorded_index);
+    if (binding.recorded_index !== null)
+      this._unused = this._unused.filter((u) => u.recorded_index !== binding.recorded_index);
   }
 
   /** @internal The failure for recorded steps that were never called, or null when every recording was used. */
@@ -68,6 +77,16 @@ export class ReplayFidelity {
     return (
       `Replay never called ${this._unused.length} recorded step(s) from trace ${traceId}: ${steps}. ` +
       "The agent skipped part of the recorded run, so its assertions may be passing on a path the recording does not cover."
+    );
+  }
+
+  /** @internal The failure for a live replay in which nothing ran live, or null when at least one model step did. */
+  noLiveStepFailure(traceId: string): string | null {
+    if (this.live > 0) return null;
+    return (
+      `Live replay of trace ${traceId} ran no step live: none of the steps it called was recorded as type 'llm', so every ` +
+      "output came from the recording and a prompt change could not show up. Mark model steps with " +
+      'setMeta("type", "llm") and record a new trace, or replay in mocked mode.'
     );
   }
 }

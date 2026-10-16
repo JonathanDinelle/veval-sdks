@@ -13,6 +13,9 @@ class ScenarioItem:
     trace_id: Optional[str] = None
     input: Any = None
     assertions: list[ITraceAssertion] = field(default_factory=list)
+    # For a trace-backed item: serve model steps from the recording too (mocked replay) instead of running
+    # them live. Cheaper and deterministic, so it suits code changes, but it can't catch a prompt regression.
+    mock_model_steps: bool = False
 
 
 @dataclass
