@@ -68,3 +68,9 @@ test("isReplay marks trace-backed scenario items but not synthetic ones", async 
   ]);
   assert.deepEqual(seen, [true, false]);
 });
+
+test("user code can't mark a run as a replay", async () => {
+  const pkg: Record<string, unknown> = await import("../src");
+  assert.equal("markAsReplay" in pkg, false);
+  assert.equal("markAsReplay" in new VevalExecutionContext("tr_x", null), false);
+});

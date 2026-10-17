@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Coroutine, Optional, TypeVar, Union
 
 from ._options import VevalOptions
-from ._context import VevalExecutionContext
+from ._context import VevalExecutionContext, _not_awaitable
 from ._step import Step
 from ._tracing import (
     TraceData, SnapshotData, SnapshotDiff, SnapshotOptions, compare_snapshots,
@@ -56,12 +56,12 @@ class VevalSdk:
         callback: Callable[[VevalExecutionContext], T],
         input: Any = None,
     ) -> T:
-        """Synchronous run_async, for an agent that is a plain function. No event loop is involved, so it is safe to
-        call from any thread. Track steps inside it with ctx.track_step."""
+        """Synchronous run_async, for an agent that is a plain function. It needs no event loop and sends the trace on
+        the calling thread, so from async code use run_async. Track steps inside it with ctx.track_step."""
         ctx = self._new_run_context(input)
         started_at = datetime.now(timezone.utc)
         try:
-            result = callback(ctx)
+            result = _not_awaitable(callback(ctx), "run_async")
             self._check_run(ctx)
         except Exception as ex:
             self._run_finished(str(ex))
@@ -187,13 +187,14 @@ class VevalSdk:
     ) -> ReplayResult:
         """Synchronous replay_async, for an agent that is a plain function. The agent runs outside any event loop;
         assertions are evaluated after it on a private one, so call this from synchronous code."""
+        _require_no_running_loop("replay_async")
         options = options or ReplayOptions()
         ctx = _replay_context(trace, options)
         started_at = datetime.now(timezone.utc)
         output: Any = None
         error: Optional[str] = None
         try:
-            output = callback(ctx)
+            output = _not_awaitable(callback(ctx), "replay_async")
         except Exception as ex:
             error = str(ex)
 
@@ -386,10 +387,19 @@ async def _evaluate(assertions: list, ctx: VevalExecutionContext) -> list[str]:
 def _run_sync(coro: Coroutine[Any, Any, T], async_name: str) -> T:
     """Runs async SDK work for a synchronous method on a private event loop."""
     try:
+        _require_no_running_loop(async_name)
+    except RuntimeError:
+        coro.close()
+        raise
+    return asyncio.run(coro)
+
+
+def _require_no_running_loop(async_name: str) -> None:
+    """Synchronous methods that run async work are for synchronous code; checked before the agent runs."""
+    try:
         asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(coro)
-    coro.close()
+        return
     raise RuntimeError(f"Veval: called from a running event loop; use `await {async_name}(...)` instead.")
 
 

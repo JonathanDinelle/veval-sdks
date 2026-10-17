@@ -59,11 +59,6 @@ export class VevalExecutionContext {
     return this._isReplay;
   }
 
-  /** @internal Marks the run as a replay of a recorded trace. */
-  markAsReplay(): void {
-    this._isReplay = true;
-  }
-
   get steps(): readonly Step[] {
     return this._steps;
   }
@@ -190,4 +185,9 @@ export class VevalExecutionContext {
   private recordedTypeOf(name: string): string | null {
     return this._recorded!.find((r) => r.data.name === name)?.data.type ?? null;
   }
+}
+
+/** Marks a run as a replay of a recorded trace. Module-level and not exported from the package, so user code can't flip it. */
+export function markAsReplay(ctx: VevalExecutionContext): void {
+  (ctx as unknown as { _isReplay: boolean })._isReplay = true;
 }

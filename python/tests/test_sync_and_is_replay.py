@@ -100,14 +100,57 @@ def test_replay_reports_assertion_failures_from_a_synchronous_call():
     assert any("12:00" in f for f in result.failures)
 
 
-def test_sync_replay_with_assertions_inside_an_event_loop_points_to_replay_async():
+def test_sync_replay_inside_an_event_loop_points_to_replay_async_before_running_the_agent():
+    calls = []
+
     async def inside_a_loop():
-        sdk().replay(booking_trace(), booking_agent([]), ReplayOptions(
-            mock_llm_responses=True, assertions=[TraceAssert.no_errors()],
-        ))
+        sdk().replay(booking_trace(), booking_agent(calls), ReplayOptions(mock_llm_responses=True))
 
     with pytest.raises(RuntimeError, match="replay_async"):
         asyncio.run(inside_a_loop())
+    assert calls == []
+
+
+async def async_agent(ctx):
+    return await ctx.track_step_async("write_reply", "10:00", returning_async("Booked."))
+
+
+def returning_async(value):
+    async def produce():
+        return value
+    return produce
+
+
+def test_run_refuses_an_async_agent_instead_of_reporting_success():
+    veval = sdk()
+
+    with pytest.raises(TypeError, match="run_async"):
+        veval.run("booking", async_agent, "Friday")
+    assert veval.sent[0]["status"] == "error"
+
+
+def test_replay_refuses_an_async_agent():
+    result = sdk().replay(booking_trace(), async_agent, ReplayOptions(mock_llm_responses=True))
+
+    assert not result.passed
+    assert "replay_async" in result.failures[0]
+
+
+def test_track_step_refuses_an_async_step_instead_of_recording_a_coroutine():
+    def agent(ctx):
+        return ctx.track_step("write_reply", "10:00", returning_async("Booked."))
+
+    veval = sdk()
+    with pytest.raises(TypeError, match="track_step_async"):
+        veval.run("booking", agent, "Friday")
+    assert veval.sent[0]["steps"][0]["status"] == "error"
+
+
+def test_a_step_whose_parameters_all_have_defaults_keeps_its_own_values():
+    def agent(ctx):
+        return [ctx.track_step("echo", t, lambda t=t: t) for t in ("a", "b")]
+
+    assert sdk().run("echo", agent) == ["a", "b"]
 
 
 def test_get_trace_returns_none_for_a_trace_the_test_sdk_does_not_hold():

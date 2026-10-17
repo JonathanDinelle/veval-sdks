@@ -96,7 +96,7 @@ class VevalExecutionContext:
 
         s, handle = self._start_step(name, input)
         try:
-            result = step(handle) if _takes_handle(step) else step()
+            result = _not_awaitable(step(handle) if _takes_handle(step) else step(), "track_step_async")
             s.complete(result)
             return result
         except Exception as ex:
@@ -188,7 +188,21 @@ class VevalExecutionContext:
 
 
 def _takes_handle(step: Callable[..., Any]) -> bool:
-    return len(inspect.signature(step).parameters) > 0
+    """Whether the step wants the StepHandle: it has a required parameter. Parameters with defaults don't count, so
+    the loop idiom lambda t=t: ... keeps its own value."""
+    return any(
+        p.default is p.empty and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        for p in inspect.signature(step).parameters.values()
+    )
+
+
+def _not_awaitable(value: Any, async_name: str) -> Any:
+    """The result of a function given to a synchronous method; an async function there would silently never run."""
+    if inspect.isawaitable(value):
+        if inspect.iscoroutine(value):
+            value.close()
+        raise TypeError(f"Veval: got an async function where a plain function is expected; use {async_name} instead.")
+    return value
 
 
 class _RecordedStep:
