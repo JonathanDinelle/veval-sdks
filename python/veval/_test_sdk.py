@@ -1,8 +1,7 @@
 from __future__ import annotations
 import uuid
 from collections import deque
-from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Optional, TypeVar, Union
 
 from ._options import VevalOptions
 from ._context import VevalExecutionContext
@@ -11,7 +10,7 @@ from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
-from ._sdk import VevalSdk, _flatten_steps, _missing_trace_message
+from ._sdk import VevalSdk, _call_agent, _evaluate, _missing_trace_message
 
 T = TypeVar("T")
 
@@ -81,58 +80,33 @@ class VevalTestSdk(VevalSdk):
             "TraceAssert.judge — this would have made a real, billed LLM call."
         )
 
-    async def run_async(
-        self,
-        agent_name: str,
-        callback: Callable[[VevalExecutionContext], Awaitable[T]],
-        input: Any = None,
-    ) -> T:
-        ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", input)
+    def _new_run_context(self, input: Any) -> VevalExecutionContext:
+        ctx = super()._new_run_context(input)
         if self._replay_trace:
             ctx.load_mock_outputs(self._replay_trace)
+        return ctx
 
-        started_at = datetime.now(timezone.utc)
-        try:
-            output = await callback(ctx)
-            # A recorded step the agent never called fails the run, the same way an unrecorded call does.
-            fidelity = ctx.replay_fidelity
-            unused = fidelity._unused_failure(self._replay_trace.trace_id) if self._replay_trace and fidelity else None
-            if unused:
-                raise RuntimeError(unused)
-        except Exception as ex:
-            self._last_status = "error"
-            self._last_error = str(ex)
-            # The agent's own exception takes priority over a failed send (which is still logged).
-            await self._send_run_trace(ctx, agent_name, input, None, "error", str(ex), started_at,
-                                       raise_on_failure=False)
-            raise
+    def _check_run(self, ctx: VevalExecutionContext) -> None:
+        # A recorded step the agent never called fails the run, the same way an unrecorded call does.
+        fidelity = ctx.replay_fidelity
+        unused = fidelity._unused_failure(self._replay_trace.trace_id) if self._replay_trace and fidelity else None
+        if unused:
+            raise RuntimeError(unused)
 
-        self._last_status = "success"
-        self._last_error = None
-        await self._send_run_trace(ctx, agent_name, input, output, "success", None, started_at)
-        return output
+    def _run_finished(self, error: Optional[str]) -> None:
+        self._last_status = "error" if error is not None else "success"
+        self._last_error = error
 
-    async def _send_run_trace(
-        self,
-        ctx: VevalExecutionContext,
-        agent_name: str,
-        input: Any,
-        output: Any,
-        status: str,
-        error: Optional[str],
-        started_at: datetime,
-        raise_on_failure: Optional[bool] = None,
-    ) -> None:
+    def _run_extra_meta(self) -> Optional[dict]:
         extra_meta: dict[str, Any] = {"replay": True}
         if self._replay_trace:
             extra_meta["source_trace_id"] = self._replay_trace.trace_id
-        payload = self._build_payload(
-            ctx.trace_id, agent_name, ctx,
-            input, output, status, error,
-            started_at, datetime.now(timezone.utc),
-            extra_meta=extra_meta,
-        )
-        await self._client.send_trace_async(payload, raise_on_failure=raise_on_failure)
+        return extra_meta
+
+    def get_trace(self, trace_id: str) -> Optional[TraceData]:
+        if self._replay_trace and self._replay_trace.trace_id == trace_id:
+            return self._replay_trace
+        return None
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         if self._replay_trace and self._replay_trace.trace_id == trace_id:
@@ -159,7 +133,7 @@ class VevalTestSdk(VevalSdk):
     async def run_scenario_async(
         self,
         scenario_name: str,
-        agent: Callable[[VevalExecutionContext], Awaitable[T]],
+        agent: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
         mock_model_steps: bool = False,
@@ -199,14 +173,11 @@ class VevalTestSdk(VevalSdk):
             elif item.input is not None:
                 ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", item.input)
                 try:
-                    await agent(ctx)
+                    await _call_agent(agent, ctx)
                 except Exception as ex:
                     item_result.failures.append(f"Agent threw exception: {ex}")
 
-                for assertion in effective_assertions:
-                    failure = await assertion.evaluate_async(ctx)
-                    if failure:
-                        item_result.failures.append(failure)
+                item_result.failures.extend(await _evaluate(effective_assertions, ctx))
                 item_result.context = ctx
             else:
                 item_result.failures.append("ScenarioItem must have either trace_id or input")

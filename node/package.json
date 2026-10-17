@@ -1,6 +1,6 @@
 {
   "name": "@veval/sdk",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Trace, evaluate, and test AI agents with a few lines of code.",
   "license": "MIT",
   "main": "dist/index.js",

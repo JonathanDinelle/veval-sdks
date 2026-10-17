@@ -1,7 +1,8 @@
 from __future__ import annotations
+import asyncio
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -45,34 +46,39 @@ class VevalHttpClient:
             "Content-Type": "application/json",
         }
 
-    async def send_trace_async(self, payload: Any, raise_on_failure: Optional[bool] = None) -> bool:
+    def send_trace(self, payload: Any, raise_on_failure: Optional[bool] = None) -> bool:
         """Never raises unless raise_on_failure (default: the raise_on_send_failure option) is set;
         a failed send is logged as a warning instead, so tracing can't break the host app.
         Returns whether the trace was stored."""
-        return await self._send_async("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
+        return self._send("Sending trace", f"{self._endpoint}/v1/traces", payload, raise_on_failure)
 
-    async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
+    async def send_trace_async(self, payload: Any, raise_on_failure: Optional[bool] = None) -> bool:
+        """Same as send_trace, without blocking the event loop."""
+        return await _in_executor(self.send_trace, payload, raise_on_failure)
+
+    def get_trace(self, trace_id: str) -> Optional[TraceData]:
         """Returns None only when the trace doesn't exist (404); any other failure raises
         VevalRequestError, so a wrong API key or a network error can't look like a missing trace."""
-        data = await self._load_async(
-            f"Loading trace '{trace_id}'", f"{self._endpoint}/v1/traces/{trace_id}", none_on_404=True
-        )
+        data = self._load(f"Loading trace '{trace_id}'", f"{self._endpoint}/v1/traces/{trace_id}", none_on_404=True)
         return TraceData.from_dict(data) if data is not None else None
+
+    async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
+        """Same as get_trace, without blocking the event loop."""
+        return await _in_executor(self.get_trace, trace_id)
 
     async def get_scenario_items_async(self, scenario_name: str) -> list[dict]:
         """Raises VevalRequestError on failure — returning an empty list would run zero items and
         report the scenario as passed."""
         encoded = quote(scenario_name, safe="")
-        data = await self._load_async(
-            f"Loading items for scenario '{scenario_name}'", f"{self._endpoint}/v1/scenarios/{encoded}/items"
+        data = await _in_executor(
+            self._load, f"Loading items for scenario '{scenario_name}'", f"{self._endpoint}/v1/scenarios/{encoded}/items"
         )
         return data.get("items") or []
 
-    async def _load_async(self, what: str, url: str, none_on_404: bool = False) -> Optional[dict]:
-        import asyncio
+    def _load(self, what: str, url: str, none_on_404: bool = False) -> Optional[dict]:
         get = self._get_or_none_on_404 if none_on_404 else self._get_json
         try:
-            return await asyncio.get_running_loop().run_in_executor(None, get, url)
+            return get(url)
         except HTTPError as ex:
             raise VevalRequestError(
                 f"Veval: {what} failed with status {ex.code}{_reason(ex)}", ex.code
@@ -84,15 +90,14 @@ class VevalHttpClient:
     async def post_scenario_run_async(self, scenario_name: str, payload: Any) -> None:
         """Same failure behaviour as send_trace_async."""
         encoded = quote(scenario_name, safe="")
-        await self._send_async(
-            f"Posting scenario run '{scenario_name}'",
+        await _in_executor(
+            self._send, f"Posting scenario run '{scenario_name}'",
             f"{self._endpoint}/v1/scenarios/{encoded}/runs", payload, None,
         )
 
-    async def _send_async(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> bool:
-        import asyncio
+    def _send(self, what: str, url: str, payload: Any, raise_on_failure: Optional[bool]) -> bool:
         try:
-            await asyncio.get_running_loop().run_in_executor(None, self._post, url, payload)
+            self._post(url, payload)
             return True
         except HTTPError as ex:
             error = VevalSendError(f"Veval: {what} failed with status {ex.code}{_reason(ex)}", ex.code)
@@ -108,27 +113,24 @@ class VevalHttpClient:
         # Unlike the other calls on this client, judge_async deliberately does not swallow
         # failures — a network/API error here must surface as an assertion failure, not a
         # silent pass. Callers are expected to catch.
-        import asyncio
-        return await asyncio.get_running_loop().run_in_executor(
-            None, self._post_json, f"{self._endpoint}/v1/judge", payload
+        return await _in_executor(
+            self._post_json, f"{self._endpoint}/v1/judge", payload
         )
 
     async def create_snapshot_async(self, payload: Any) -> SnapshotData:
         # Raises on failure — a baseline that silently didn't save would make every later
         # comparison fail, or compare against a stale one.
-        import asyncio
-        data = await asyncio.get_running_loop().run_in_executor(
-            None, self._post_json, f"{self._endpoint}/v1/snapshots", payload
+        data = await _in_executor(
+            self._post_json, f"{self._endpoint}/v1/snapshots", payload
         )
         return SnapshotData.from_dict(data)
 
     async def get_snapshot_async(self, name: str) -> Optional[SnapshotData]:
         # Returns None only when no baseline exists (404); any other failure raises, so a network
         # error can never look like "nothing to compare against".
-        import asyncio
         encoded = quote(name, safe="")
-        data = await asyncio.get_running_loop().run_in_executor(
-            None, self._get_or_none_on_404, f"{self._endpoint}/v1/snapshots/{encoded}"
+        data = await _in_executor(
+            self._get_or_none_on_404, f"{self._endpoint}/v1/snapshots/{encoded}"
         )
         return SnapshotData.from_dict(data) if data is not None else None
 
@@ -159,6 +161,11 @@ class VevalHttpClient:
         # urlopen raises HTTPError for any non-2xx status, so a 401 or 429 is a failure here too.
         with urlopen(req, timeout=10):
             pass
+
+
+async def _in_executor(fn: Callable[..., Any], *args: Any) -> Any:
+    """Runs a blocking call on the default executor so it doesn't block the event loop."""
+    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
 
 
 def _reason(ex: HTTPError) -> str:

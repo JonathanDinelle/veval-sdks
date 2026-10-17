@@ -85,7 +85,7 @@ public class VevalSdk : IVevalSdk
     public async Task<ReplayResult> ReplayAsync<T>(
         TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
     {
-        var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input);
+        var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input) { IsReplay = true };
         if (options.LiveModelSteps)
             ctx.LoadMockOutputs(trace, liveModelSteps: true);
         else if (options.MockLlmResponses)

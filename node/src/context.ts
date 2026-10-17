@@ -43,10 +43,20 @@ export class VevalExecutionContext {
   private _fidelity: ReplayFidelity | null = null;
   private _strictMockMode = false;
   private _liveModelSteps = false;
+  private _isReplay = false;
 
   constructor(traceId: string, input: unknown) {
     this.traceId = traceId;
     this.input = input;
+  }
+
+  /**
+   * True when this run replays a recorded trace: `replayAsync`, a trace-backed scenario item, or
+   * `VevalTestSdk.withReplay`, mocked or live. Check it before a side effect that isn't inside a step
+   * served from the recording, such as sending an email; in a live replay, model steps run for real.
+   */
+  get isReplay(): boolean {
+    return this._isReplay;
   }
 
   get steps(): readonly Step[] {
@@ -146,6 +156,7 @@ export class VevalExecutionContext {
         "Ensure the trace was recorded with steps before using it for replay."
       );
     }
+    this._isReplay = true;
     this._strictMockMode = strict;
     this._liveModelSteps = liveModelSteps;
     this._recorded = trace.steps.map((data, index) => ({
@@ -174,4 +185,9 @@ export class VevalExecutionContext {
   private recordedTypeOf(name: string): string | null {
     return this._recorded!.find((r) => r.data.name === name)?.data.type ?? null;
   }
+}
+
+/** Marks a run as a replay of a recorded trace. Module-level and not exported from the package, so user code can't flip it. */
+export function markAsReplay(ctx: VevalExecutionContext): void {
+  (ctx as unknown as { _isReplay: boolean })._isReplay = true;
 }

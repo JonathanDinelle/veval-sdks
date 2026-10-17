@@ -78,7 +78,12 @@ ctx.SetMetadata("user_id", "u_123");   // trace-level metadata
 Console.WriteLine(ctx.TraceId);         // e.g. for logging
 var input = ctx.Input;                  // the input passed to RunAsync
 var steps = ctx.Steps;                  // steps recorded so far (read-only)
+
+if (!ctx.IsReplay)                      // true while a recorded trace is replayed
+    await email.SendAsync(customer, reply);
 ```
+
+Replay serves recorded outputs only to code inside a step. Check `IsReplay` before work outside a step that must not run again, such as sending an email; it is true in every replay, mocked or live.
 
 ### Steps
 
@@ -284,6 +289,7 @@ Everything above, plus: `WithReplay(trace)`, `WithJudgeMock(criteria, passed, sc
 | `Input` | The input passed to `RunAsync` |
 | `Steps` | Steps recorded so far (read-only) |
 | `Judgments` | Judge verdicts recorded during this run (read-only) |
+| `IsReplay` | True while a recorded trace is replayed, mocked or live |
 
 ### Step (as seen through `ctx.Steps`)
 

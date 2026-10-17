@@ -1,10 +1,12 @@
 from __future__ import annotations
+import asyncio
+import inspect
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Awaitable, Optional, TypeVar, Union
+from typing import Any, Awaitable, Callable, Coroutine, Optional, TypeVar, Union
 
 from ._options import VevalOptions
-from ._context import VevalExecutionContext
+from ._context import VevalExecutionContext, _not_awaitable
 from ._step import Step
 from ._tracing import (
     TraceData, SnapshotData, SnapshotDiff, SnapshotOptions, compare_snapshots,
@@ -27,32 +29,74 @@ class VevalSdk:
     async def run_async(
         self,
         agent_name: str,
-        callback: Callable[[VevalExecutionContext], Awaitable[T]],
+        callback: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         input: Any = None,
     ) -> T:
-        trace_id = f"tr_{uuid.uuid4().hex}"
-        ctx = VevalExecutionContext(trace_id, input)
+        """Runs the agent and sends its trace. callback may be a coroutine function or a plain function."""
+        ctx = self._new_run_context(input)
         started_at = datetime.now(timezone.utc)
-
         try:
-            result = await callback(ctx)
+            result = await _call_agent(callback, ctx)
+            self._check_run(ctx)
         except Exception as ex:
-            completed_at = datetime.now(timezone.utc)
-            payload = self._build_payload(
-                trace_id, agent_name, ctx, input, None,
-                "error", str(ex), started_at, completed_at,
-            )
+            self._run_finished(str(ex))
             # The agent's own exception takes priority over a failed send (which is still logged).
-            await self._client.send_trace_async(payload, raise_on_failure=False)
+            await self._client.send_trace_async(
+                self._run_payload(agent_name, ctx, None, str(ex), started_at), raise_on_failure=False
+            )
             raise
 
-        completed_at = datetime.now(timezone.utc)
-        payload = self._build_payload(
-            trace_id, agent_name, ctx, input, result,
-            "success", None, started_at, completed_at,
-        )
-        await self._client.send_trace_async(payload)
+        self._run_finished(None)
+        await self._client.send_trace_async(self._run_payload(agent_name, ctx, result, None, started_at))
         return result
+
+    def run(
+        self,
+        agent_name: str,
+        callback: Callable[[VevalExecutionContext], T],
+        input: Any = None,
+    ) -> T:
+        """Synchronous run_async, for an agent that is a plain function. It needs no event loop and sends the trace on
+        the calling thread, so from async code use run_async. Track steps inside it with ctx.track_step."""
+        ctx = self._new_run_context(input)
+        started_at = datetime.now(timezone.utc)
+        try:
+            result = _not_awaitable(callback(ctx), "run_async")
+            self._check_run(ctx)
+        except Exception as ex:
+            self._run_finished(str(ex))
+            # The agent's own exception takes priority over a failed send (which is still logged).
+            self._client.send_trace(self._run_payload(agent_name, ctx, None, str(ex), started_at), raise_on_failure=False)
+            raise
+
+        self._run_finished(None)
+        self._client.send_trace(self._run_payload(agent_name, ctx, result, None, started_at))
+        return result
+
+    def _new_run_context(self, input: Any) -> VevalExecutionContext:
+        return VevalExecutionContext(f"tr_{uuid.uuid4().hex}", input)
+
+    def _check_run(self, ctx: VevalExecutionContext) -> None:
+        """Raises when a finished run must count as failed; VevalTestSdk uses it for unused recordings."""
+
+    def _run_finished(self, error: Optional[str]) -> None:
+        """Called once per run with its error, or None on success."""
+
+    def _run_extra_meta(self) -> Optional[dict]:
+        return None
+
+    def _run_payload(
+        self, agent_name: str, ctx: VevalExecutionContext, output: Any, error: Optional[str], started_at: datetime,
+    ) -> dict:
+        return self._build_payload(
+            ctx.trace_id, agent_name, ctx, ctx.input, output,
+            "error" if error is not None else "success", error, started_at, datetime.now(timezone.utc),
+            extra_meta=self._run_extra_meta(),
+        )
+
+    def get_trace(self, trace_id: str) -> Optional[TraceData]:
+        """Synchronous get_trace_async."""
+        return self._client.get_trace(trace_id)
 
     async def get_trace_async(self, trace_id: str) -> Optional[TraceData]:
         return await self._client.get_trace_async(trace_id)
@@ -117,69 +161,71 @@ class VevalSdk:
     async def replay_async(
         self,
         trace: TraceData,
-        callback: Callable[[VevalExecutionContext], Awaitable[T]],
+        callback: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         options: Optional[ReplayOptions] = None,
     ) -> ReplayResult:
+        """callback may be a coroutine function or a plain function."""
         options = options or ReplayOptions()
-        ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
-        if options.live_model_steps:
-            ctx.load_mock_outputs(trace, live_model_steps=True)
-        elif options.mock_llm_responses:
-            ctx.load_mock_outputs(trace)
-
+        ctx = _replay_context(trace, options)
         started_at = datetime.now(timezone.utc)
         output: Any = None
-        status = "success"
         error: Optional[str] = None
-
         try:
-            output = await callback(ctx)
+            output = await _call_agent(callback, ctx)
         except Exception as ex:
-            status = "error"
             error = str(ex)
 
         completed_at = datetime.now(timezone.utc)
-        failures: list[str] = []
-        if error:
-            failures.append(f"Replay threw exception: {error}")
-        fidelity = ctx.replay_fidelity
-        binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
-        if binding_failure:
-            failures.append(binding_failure)
-        for assertion in options.assertions:
-            failure = await assertion.evaluate_async(ctx)
-            if failure:
-                failures.append(failure)
+        assertion_failures = await _evaluate(options.assertions, ctx)
+        return _replay_result(trace, options, ctx, output, error, started_at, completed_at, assertion_failures)
 
-        recording_diff = None
-        if options.compare_with_recording is not None:
-            recording_diff = compare_snapshots(SnapshotData.from_trace(trace), ctx, options.compare_with_recording)
-            if recording_diff.has_changes:
-                failures.append(
-                    "Replay drifted from its recording — " + recording_diff.summary(f"recording {trace.trace_id}")
-                )
+    def replay(
+        self,
+        trace: TraceData,
+        callback: Callable[[VevalExecutionContext], T],
+        options: Optional[ReplayOptions] = None,
+    ) -> ReplayResult:
+        """Synchronous replay_async, for an agent that is a plain function. The agent runs outside any event loop;
+        assertions are evaluated after it on a private one, so call this from synchronous code."""
+        _require_no_running_loop("replay_async")
+        options = options or ReplayOptions()
+        ctx = _replay_context(trace, options)
+        started_at = datetime.now(timezone.utc)
+        output: Any = None
+        error: Optional[str] = None
+        try:
+            output = _not_awaitable(callback(ctx), "replay_async")
+        except Exception as ex:
+            error = str(ex)
 
-        return ReplayResult(
-            failures=failures,
-            replayed_context=ctx,
-            recording_diff=recording_diff,
-            fidelity=ctx.replay_fidelity,
-            output=output,
-            started_at=started_at,
-            completed_at=completed_at,
-            status=status,
-            error=error,
+        completed_at = datetime.now(timezone.utc)
+        assertion_failures = _run_sync(_evaluate(options.assertions, ctx), "replay_async") if options.assertions else []
+        return _replay_result(trace, options, ctx, output, error, started_at, completed_at, assertion_failures)
+
+    def run_scenario(
+        self,
+        scenario_name: str,
+        agent: Callable[[VevalExecutionContext], T],
+        scenario_assertions: list[ITraceAssertion],
+        items: Optional[list[ScenarioItem]] = None,
+        mock_model_steps: bool = False,
+    ) -> ScenarioRunResult:
+        """Synchronous run_scenario_async, for an agent that is a plain function. The scenario runs on a private
+        event loop, so call this from synchronous code."""
+        return _run_sync(
+            self.run_scenario_async(scenario_name, agent, scenario_assertions, items, mock_model_steps),
+            "run_scenario_async",
         )
 
     async def run_scenario_async(
         self,
         scenario_name: str,
-        agent: Callable[[VevalExecutionContext], Awaitable[T]],
+        agent: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
         mock_model_steps: bool = False,
     ) -> ScenarioRunResult:
-        """mock_model_steps replays every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps;
+        """agent may be a coroutine function or a plain function. mock_model_steps replays every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps;
         it is the switch for items loaded from the dashboard."""
         if items is None:
             raw_items = await self._client.get_scenario_items_async(scenario_name)
@@ -226,10 +272,7 @@ class VevalSdk:
 
             elif item.input is not None:
                 ctx = await self._run_and_capture_context(scenario_name, agent, item.input, report)
-                for assertion in effective_assertions:
-                    failure = await assertion.evaluate_async(ctx)
-                    if failure:
-                        item_result.failures.append(failure)
+                item_result.failures.extend(await _evaluate(effective_assertions, ctx))
                 item_result.context = ctx
             else:
                 item_result.failures.append("ScenarioItem must have either trace_id or input")
@@ -242,7 +285,7 @@ class VevalSdk:
     async def _run_and_capture_context(
         self,
         agent_name: str,
-        agent: Callable[[VevalExecutionContext], Awaitable[T]],
+        agent: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         input: Any,
         report: ScenarioReport,
     ) -> VevalExecutionContext:
@@ -255,7 +298,7 @@ class VevalSdk:
         status = "success"
         error: Optional[str] = None
         try:
-            output = await agent(ctx)
+            output = await _call_agent(agent, ctx)
         except Exception as ex:
             # Not rethrown: assertions see the error through the step statuses.
             status = "error"
@@ -324,6 +367,90 @@ class VevalSdk:
                 for s in steps
             ],
         }
+
+
+async def _call_agent(agent: Callable[[VevalExecutionContext], Any], ctx: VevalExecutionContext) -> Any:
+    """Calls an agent that is either a coroutine function or a plain function."""
+    result = agent(ctx)
+    return await result if inspect.isawaitable(result) else result
+
+
+async def _evaluate(assertions: list, ctx: VevalExecutionContext) -> list[str]:
+    failures: list[str] = []
+    for assertion in assertions:
+        failure = await assertion.evaluate_async(ctx)
+        if failure:
+            failures.append(failure)
+    return failures
+
+
+def _run_sync(coro: Coroutine[Any, Any, T], async_name: str) -> T:
+    """Runs async SDK work for a synchronous method on a private event loop."""
+    try:
+        _require_no_running_loop(async_name)
+    except RuntimeError:
+        coro.close()
+        raise
+    return asyncio.run(coro)
+
+
+def _require_no_running_loop(async_name: str) -> None:
+    """Synchronous methods that run async work are for synchronous code; checked before the agent runs."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    raise RuntimeError(f"Veval: called from a running event loop; use `await {async_name}(...)` instead.")
+
+
+def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionContext:
+    ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
+    ctx._is_replay = True
+    if options.live_model_steps:
+        ctx.load_mock_outputs(trace, live_model_steps=True)
+    elif options.mock_llm_responses:
+        ctx.load_mock_outputs(trace)
+    return ctx
+
+
+def _replay_result(
+    trace: TraceData,
+    options: ReplayOptions,
+    ctx: VevalExecutionContext,
+    output: Any,
+    error: Optional[str],
+    started_at: datetime,
+    completed_at: datetime,
+    assertion_failures: list[str],
+) -> ReplayResult:
+    failures: list[str] = []
+    if error:
+        failures.append(f"Replay threw exception: {error}")
+    fidelity = ctx.replay_fidelity
+    binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
+    if binding_failure:
+        failures.append(binding_failure)
+    failures.extend(assertion_failures)
+
+    recording_diff = None
+    if options.compare_with_recording is not None:
+        recording_diff = compare_snapshots(SnapshotData.from_trace(trace), ctx, options.compare_with_recording)
+        if recording_diff.has_changes:
+            failures.append(
+                "Replay drifted from its recording — " + recording_diff.summary(f"recording {trace.trace_id}")
+            )
+
+    return ReplayResult(
+        failures=failures,
+        replayed_context=ctx,
+        recording_diff=recording_diff,
+        fidelity=fidelity,
+        output=output,
+        started_at=started_at,
+        completed_at=completed_at,
+        status="error" if error else "success",
+        error=error,
+    )
 
 
 def _scenario_replay_options(item: ScenarioItem, mock_model_steps: bool, assertions: list) -> ReplayOptions:

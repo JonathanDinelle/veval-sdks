@@ -1,5 +1,5 @@
 import { VevalOptions, ResolvedVevalOptions, resolveOptions } from "./options";
-import { VevalExecutionContext } from "./context";
+import { VevalExecutionContext, markAsReplay } from "./context";
 import { Step } from "./step";
 import { TraceData, StepData, ReplayOptions, ReplayResult } from "./tracing";
 import {
@@ -134,6 +134,7 @@ export class VevalSdk {
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
+    markAsReplay(ctx);
     if (options?.live_model_steps) {
       ctx.loadMockOutputs(trace, true, true);
     } else if (options?.mock_llm_responses) {
