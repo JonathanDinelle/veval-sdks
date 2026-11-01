@@ -25,6 +25,17 @@ def _input_key(value: Any, ignore_fields: set[str] = _NO_IGNORED_FIELDS) -> str:
     return _canonicalize(value, ignore_fields)
 
 
+def _ignoring_key(value: Any, ignore_fields: tuple[str, ...]) -> str:
+    """The matching key of an input with some fields dropped. An input that is a JSON object or array encoded as a
+    string, such as a model's tool-call arguments, is parsed first, so its fields can be dropped too."""
+    if isinstance(value, str) and value.lstrip()[:1] in ("{", "["):
+        try:
+            return _input_key(json.loads(value), set(ignore_fields))
+        except ValueError:
+            pass  # not JSON after all: compare the text
+    return _input_key(value, set(ignore_fields))
+
+
 def _one_line(value: Any) -> str:
     """An input as compact JSON for a message, as the C# and Node SDKs print it."""
     try:
@@ -133,6 +144,8 @@ class VevalExecutionContext:
             raise ReplayStoppedError(self._fidelity.stop)
 
         rule = self._step_rules.get(name)
+        if rule is not None and not isinstance(rule, ReplayStepRule):
+            raise TypeError(f"step_rules['{name}'] must be a ReplayStepRule, not {type(rule).__name__}")
         recorded, exact = self._find_recording(name, input, rule)
         # In live mode a model step runs for real, including extra calls of a step recorded as a model step.
         recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
@@ -215,12 +228,13 @@ class VevalExecutionContext:
         if rule is not None and rule.match_on_name_only:
             return candidates[0], True
 
-        ignore = set(rule.ignore_input_fields) if rule is not None else set()
-        actual = _input_key(input, ignore)
-        match = next(
-            (r for r in candidates if (r.canonical_input if not ignore else _input_key(r.data.input, ignore)) == actual),
-            None,
-        )
+        ignore = tuple(sorted(rule.ignore_input_fields)) if rule is not None else ()
+        if not ignore:
+            actual = _input_key(input)
+            match = next((r for r in candidates if r.canonical_input == actual), None)
+        else:
+            actual = _ignoring_key(input, ignore)
+            match = next((r for r in candidates if r.key_ignoring(ignore) == actual), None)
         return match or candidates[0], match is not None
 
     def _stops_on_divergence(self, rule: Optional[ReplayStepRule], recorded_type: Optional[str]) -> bool:
@@ -301,3 +315,10 @@ class _RecordedStep:
         self.index = index
         self.canonical_input = _input_key(data.input)
         self.consumed = False
+        self._keys_ignoring: dict[tuple[str, ...], str] = {}
+
+    def key_ignoring(self, ignore: tuple[str, ...]) -> str:
+        """The input's matching key with these (sorted) fields dropped, computed once per field set."""
+        if ignore not in self._keys_ignoring:
+            self._keys_ignoring[ignore] = _ignoring_key(self.data.input, ignore)
+        return self._keys_ignoring[ignore]

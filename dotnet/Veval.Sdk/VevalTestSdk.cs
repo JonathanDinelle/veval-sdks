@@ -176,12 +176,8 @@ public class VevalTestSdk : IVevalSdk
                 else
                 {
                     // The test double never makes live model calls: trace-backed items always replay mocked.
-                    var replayResult = await ReplayAsync(trace, agent, new ReplayOptions
-                    {
-                        MockLlmResponses = true,
-                        Assertions = effectiveAssertions,
-                        StepRules = VevalSdk.MergeStepRules(stepRules, item.StepRules),
-                    });
+                    var replayResult = await ReplayAsync(trace, agent,
+                        VevalSdk.ScenarioReplayOptions(item, mockModelSteps: true, effectiveAssertions, stepRules));
                     itemResult.Failures.AddRange(replayResult.Failures);
                     itemResult.Inconclusive = replayResult.Inconclusive;
                     itemResult.Context = replayResult.ReplayedContext;

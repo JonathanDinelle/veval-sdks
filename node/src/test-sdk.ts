@@ -1,5 +1,5 @@
 import { VevalOptions } from "./options";
-import { VevalSdk, mergeStepRules, missingTraceMessage } from "./sdk";
+import { VevalSdk, missingTraceMessage, scenarioReplayOptions } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
@@ -146,11 +146,8 @@ export class VevalTestSdk extends VevalSdk {
           itemResult.passed = false;
         } else {
           // The test double never makes live model calls: trace-backed items always replay mocked.
-          const replayResult = await this.replayAsync(trace, agent, {
-            mock_llm_responses: true,
-            assertions: effectiveAssertions,
-            step_rules: mergeStepRules(options?.step_rules, item.step_rules),
-          } as ReplayOptions);
+          const replayResult = await this.replayAsync(trace, agent,
+            scenarioReplayOptions(item, { ...options, mock_model_steps: true }, effectiveAssertions));
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
           itemResult.inconclusive = replayResult.inconclusive;

@@ -25,7 +25,7 @@ public class VevalExecutionContext
     private bool _strictMockMode;
     private bool _liveModelSteps;
     private IReadOnlyDictionary<string, ReplayStepRule> _stepRules = new Dictionary<string, ReplayStepRule>();
-    private ISet<string> _stopOnDivergenceTypes = new HashSet<string>();
+    private ISet<string> _stopOnDivergenceTypes = new HashSet<string> { "tool" };
 
     /// <summary>Steps recorded so far, in order — readable by custom assertions.</summary>
     public IReadOnlyList<Step> Steps => _steps;
@@ -166,12 +166,44 @@ public class VevalExecutionContext
             return candidates[0];
         }
 
-        var ignore = rule?.IgnoreInputFields is { Count: > 0 } fields ? fields.ToArray() : Array.Empty<string>();
-        var actual = SnapshotValues.Canonicalize(input, ignore);
-        var match = candidates.FirstOrDefault(r =>
-            (ignore.Length == 0 ? r.CanonicalInput : SnapshotValues.Canonicalize(r.Data.Input, ignore)) == actual);
+        if (rule?.IgnoreInputFields is not { Count: > 0 } fields)
+        {
+            var key = SnapshotValues.Canonicalize(input, Array.Empty<string>());
+            var identical = candidates.FirstOrDefault(r => r.CanonicalInput == key);
+            exact = identical != null;
+            return identical ?? candidates[0];
+        }
+
+        var ignore = fields.OrderBy(f => f, StringComparer.Ordinal).ToArray();
+        var actual = IgnoringKey(input, ignore);
+        var match = candidates.FirstOrDefault(r => r.KeyIgnoring(ignore) == actual);
         exact = match != null;
         return match ?? candidates[0];
+    }
+
+    /// <summary>
+    /// The matching key of an input with some fields dropped. An input that is a JSON object or array encoded as a
+    /// string, such as a model's tool-call arguments, is parsed first, so its fields can be dropped too.
+    /// </summary>
+    private static string IgnoringKey(object? input, string[] ignore)
+    {
+        var text = input switch
+        {
+            string s => s,
+            JsonElement { ValueKind: JsonValueKind.String } el => el.GetString(),
+            _ => null,
+        };
+        var trimmed = text?.TrimStart();
+        if (trimmed is { Length: > 0 } && (trimmed[0] == '{' || trimmed[0] == '['))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(text);
+                return SnapshotValues.Canonicalize(doc.RootElement.Clone(), ignore);
+            }
+            catch (JsonException) { /* not JSON after all: compare the text */ }
+        }
+        return SnapshotValues.Canonicalize(input, ignore);
     }
 
     /// <summary>Whether a diverged call of this step stops a live replay: the step's rule decides, else its recorded type.</summary>
@@ -237,6 +269,16 @@ public class VevalExecutionContext
         public int Index { get; }
         public string CanonicalInput { get; }
         public bool Consumed { get; set; }
+        private readonly Dictionary<string, string> _keysIgnoring = new();
+
+        /// <summary>The input's matching key with these (sorted) fields dropped, computed once per field set.</summary>
+        public string KeyIgnoring(string[] ignore)
+        {
+            var cacheKey = string.Join("\u0001", ignore);
+            if (!_keysIgnoring.TryGetValue(cacheKey, out var key))
+                _keysIgnoring[cacheKey] = key = IgnoringKey(Data.Input, ignore);
+            return key;
+        }
 
         public RecordedStep(StepData data, int index)
         {

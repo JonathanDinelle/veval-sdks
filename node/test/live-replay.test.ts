@@ -208,6 +208,21 @@ test("live replay: ignored input fields don't count as divergence", async () => 
   assert.equal(withRule.outcome, "passed", withRule.failures.join("; "));
 });
 
+test("live replay ignores fields inside a JSON string input", async () => {
+  // A model's tool-call arguments often arrive as a JSON string rather than an object.
+  const trace = browserTrace();
+  trace.steps[3].input = '{"reasoning":"check the form","tab":1}';
+  const result = await sdk().replayAsync(trace, async (ctx) => {
+    await ctx.trackStepAsync("plan", "book", async () => "fill");
+    await ctx.trackStepAsync("narrate", { text: "Filling the date" }, async () => "ok");
+    await ctx.trackStepAsync("fill", { field: "date", value: "2026-11-02" }, async () => "filled");
+    const page = await ctx.trackStepAsync("page_snapshot", '{"tab": 1, "reasoning": "make sure the date stuck"}', async () => "live");
+    return ctx.trackStepAsync("answer", page, async () => "Booked for Nov 2.");
+  }, { live_model_steps: true, assertions: [], step_rules: { page_snapshot: { ignore_input_fields: ["reasoning"] } } });
+
+  assert.equal(result.outcome, "passed", result.inconclusive?.message);
+});
+
 test("live replay serves a diverged untyped step by default and reports it", async () => {
   const result = await liveReplay(browserAgent({ narration: "Typing the date" }));
 

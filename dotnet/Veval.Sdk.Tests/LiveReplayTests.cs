@@ -364,4 +364,29 @@ public class LiveReplayTests
         (result.PassCount, result.FailCount, result.InconclusiveCount).Should().Be((1, 1, 1));
         result.Results[2].Passed.Should().BeFalse();
     }
+
+    [Fact]
+    public async Task LiveReplay_IgnoresFieldsInsideAJsonStringInput()
+    {
+        // A model's tool-call arguments often arrive as a JSON string rather than an object.
+        var trace = BrowserTrace();
+        trace.Steps[3].Input = "{\"reasoning\":\"check the form\",\"tab\":1}";
+        Func<VevalExecutionContext, Task<string>> agent = async ctx =>
+        {
+            await ctx.TrackStepAsync("plan", "book", () => Task.FromResult("fill"));
+            await ctx.TrackStepAsync("narrate", new { text = "Filling the date" }, () => Task.FromResult("ok"));
+            await ctx.TrackStepAsync("fill", new { field = "date", value = "2026-11-02" }, () => Task.FromResult("filled"));
+            var page = await ctx.TrackStepAsync("page_snapshot", "{\"tab\": 1, \"reasoning\": \"make sure the date stuck\"}",
+                () => Task.FromResult("live"));
+            return await ctx.TrackStepAsync("answer", page, () => Task.FromResult("Booked for Nov 2."));
+        };
+
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(trace, agent, new ReplayOptions
+        {
+            LiveModelSteps = true,
+            StepRules = { ["page_snapshot"] = new ReplayStepRule { IgnoreInputFields = new HashSet<string> { "reasoning" } } },
+        });
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, result.Inconclusive?.Message);
+    }
 }

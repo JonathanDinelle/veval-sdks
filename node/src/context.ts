@@ -15,6 +15,8 @@ interface RecordedStep {
   index: number;
   canonicalInput: string;
   consumed: boolean;
+  /** Matching keys with some fields dropped, by sorted field list; computed once per field set. */
+  keysIgnoring: Map<string, string>;
 }
 
 const NO_IGNORED_FIELDS = new Set<string>();
@@ -31,6 +33,31 @@ function inputKey(value: unknown, ignoreFields: Set<string> = NO_IGNORED_FIELDS)
     // not JSON-serializable (e.g. a cycle): compare as-is
   }
   return canonicalize(sent, ignoreFields);
+}
+
+/**
+ * The matching key of an input with some fields dropped. An input that is a JSON object or array encoded as a string,
+ * such as a model's tool-call arguments, is parsed first, so its fields can be dropped too.
+ */
+function ignoringKey(value: unknown, ignoreFields: Set<string>): string {
+  if (typeof value === "string" && /^\s*[[{]/.test(value)) {
+    try {
+      return inputKey(JSON.parse(value), ignoreFields);
+    } catch {
+      // not JSON after all: compare the text
+    }
+  }
+  return inputKey(value, ignoreFields);
+}
+
+function keyIgnoring(recorded: RecordedStep, ignore: string[]): string {
+  const cacheKey = ignore.join("\u0001");
+  let key = recorded.keysIgnoring.get(cacheKey);
+  if (key === undefined) {
+    key = ignoringKey(recorded.data.input, new Set(ignore));
+    recorded.keysIgnoring.set(cacheKey, key);
+  }
+  return key;
 }
 
 /** An input as compact JSON for a message, as the C# and Python SDKs print it. */
@@ -194,6 +221,7 @@ export class VevalExecutionContext {
       index,
       canonicalInput: inputKey(data.input),
       consumed: false,
+      keysIgnoring: new Map<string, string>(),
     }));
     this._fidelity = new ReplayFidelity(this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })));
   }
@@ -210,9 +238,9 @@ export class VevalExecutionContext {
     if (candidates.length === 0) return { recorded: null, exact: false };
     if (rule?.match_on_name_only) return { recorded: candidates[0], exact: true };
 
-    const ignore = new Set(rule?.ignore_input_fields ?? []);
-    const actual = inputKey(input, ignore);
-    const match = candidates.find((r) => (ignore.size === 0 ? r.canonicalInput : inputKey(r.data.input, ignore)) === actual);
+    const ignore = [...new Set(rule?.ignore_input_fields ?? [])].sort();
+    const actual = ignore.length === 0 ? inputKey(input) : ignoringKey(input, new Set(ignore));
+    const match = candidates.find((r) => (ignore.length === 0 ? r.canonicalInput : keyIgnoring(r, ignore)) === actual);
     return { recorded: match ?? candidates[0], exact: match !== undefined };
   }
 

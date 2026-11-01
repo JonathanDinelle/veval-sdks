@@ -47,6 +47,16 @@ class ReplayStepRule:
     # stop when the step was recorded with one of those types, serve otherwise.
     on_divergence: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        if self.on_divergence not in (None, STOP, SERVE):
+            raise ValueError(f"ReplayStepRule.on_divergence must be 'stop', 'serve' or None, not {self.on_divergence!r}")
+        if isinstance(self.ignore_input_fields, str):
+            raise TypeError(
+                "ReplayStepRule.ignore_input_fields takes a collection of field names, such as {\"reasoning\"}, "
+                f"not the string {self.ignore_input_fields!r}"
+            )
+        self.ignore_input_fields = set(self.ignore_input_fields)
+
 
 @dataclass(frozen=True)
 class ReplayStop:

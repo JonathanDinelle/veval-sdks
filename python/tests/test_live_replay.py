@@ -4,6 +4,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never reach the real API
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -242,6 +244,32 @@ def test_live_replay_ignored_input_fields_dont_count_as_divergence():
 
     assert without_rule.inconclusive.step_name == "page_snapshot"
     assert with_rule.outcome == "passed", with_rule.failures
+
+
+def test_live_replay_ignores_fields_inside_a_json_string_input():
+    # A model's tool-call arguments often arrive as a JSON string rather than an object.
+    trace = browser_trace()
+    trace.steps[3].input = '{"reasoning":"check the form","tab":1}'
+
+    async def agent(ctx):
+        await ctx.track_step_async("plan", "book", returning("fill"))
+        await ctx.track_step_async("narrate", {"text": "Filling the date"}, returning("ok"))
+        await ctx.track_step_async("fill", {"field": "date", "value": "2026-11-02"}, returning("filled"))
+        page = await ctx.track_step_async(
+            "page_snapshot", '{"tab": 1, "reasoning": "make sure the date stuck"}', returning("live"))
+        return await ctx.track_step_async("answer", page, returning("Booked for Nov 2."))
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(
+        live_model_steps=True, step_rules={"page_snapshot": ReplayStepRule(ignore_input_fields={"reasoning"})},
+    )))
+    assert result.outcome == "passed", result.inconclusive and result.inconclusive.message
+
+
+def test_replay_step_rule_rejects_values_it_would_misread():
+    with pytest.raises(ValueError):
+        ReplayStepRule(on_divergence="Stop")
+    with pytest.raises(TypeError):
+        ReplayStepRule(ignore_input_fields="reasoning")
 
 
 def test_live_replay_serves_a_diverged_untyped_step_by_default_and_reports_it():
