@@ -48,11 +48,21 @@ public class VevalExecutionContext
         Input = input;
     }
 
-    public async Task<T> TrackStepAsync<T>(string name, object? input, Func<Task<T>> step)
-        => await TrackStepAsync(name, input, _ => step());
+    public Task<T> TrackStepAsync<T>(string name, object? input, Func<Task<T>> step)
+        => TrackStepAsync(name, input, _ => step(), NoOptions);
 
-    public async Task<T> TrackStepAsync<T>(string name, object? input, Func<StepHandle, Task<T>> step)
+    public Task<T> TrackStepAsync<T>(string name, object? input, Func<StepHandle, Task<T>> step)
+        => TrackStepAsync(name, input, step, NoOptions);
+
+    /// <param name="options">Settings known before the step runs, such as its type (<see cref="StepOptions.Type"/>).</param>
+    public Task<T> TrackStepAsync<T>(string name, object? input, Func<Task<T>> step, StepOptions options)
+        => TrackStepAsync(name, input, _ => step(), options);
+
+    /// <param name="options">Settings known before the step runs, such as its type (<see cref="StepOptions.Type"/>).</param>
+    public async Task<T> TrackStepAsync<T>(string name, object? input, Func<StepHandle, Task<T>> step, StepOptions options)
     {
+        var declaredType = options.Type;
+        string? effectiveType = declaredType;
         if (_recorded != null)
         {
             // Once a live replay has stopped, nothing after it can be served truthfully, even if the agent caught the stop.
@@ -61,12 +71,17 @@ public class VevalExecutionContext
             _stepRules.TryGetValue(name, out var rule);
             var recorded = FindRecording(name, input, rule, out var exact);
             var recordedType = recorded?.Data.Type ?? RecordedTypeOf(name);
-            // In live mode a model step runs for real, including extra calls of a step recorded as a model step.
-            var runLive = _liveModelSteps && recordedType == "llm";
+            // The recording knows what the step was; the call site's type only fills in for a step it never contained.
+            effectiveType = recordedType ?? declaredType;
+            // In live mode a model step runs for real, including extra calls of a step recorded as a model step and
+            // model steps the recording never contained.
+            var runLive = _liveModelSteps && effectiveType == StepType.Llm;
+            var conflictingType = recordedType != null && declaredType != null && declaredType != recordedType
+                ? declaredType : null;
 
             if (recorded == null && !runLive && _strictMockMode)
             {
-                if (_liveModelSteps) throw StopAt(name, ReplayStopReason.NoRecording, null, input, recordedType);
+                if (_liveModelSteps) throw StopAt(name, ReplayStopReason.NoRecording, null, input, effectiveType);
                 throw new InvalidOperationException(
                     $"Replay mode: no mock output for step '{name}'. " +
                     $"Available steps: {AvailableSteps()}. " +
@@ -75,18 +90,20 @@ public class VevalExecutionContext
 
             // A live model handed a recording from another path would reason over a page it never reached.
             if (_liveModelSteps && !runLive && recorded != null && !exact && StopsOnDivergence(rule, recorded.Data.Type))
-                throw StopAt(name, ReplayStopReason.Diverged, recorded.Data.Input, input, recordedType);
+                throw StopAt(name, ReplayStopReason.Diverged, recorded.Data.Input, input, effectiveType);
 
             if (recorded != null) recorded.Consumed = true;
 
             if (runLive)
             {
-                _fidelity!.Record(new ReplayBinding(name, ReplayBindingKind.Live, recorded?.Index, recorded?.Data.Input, input));
+                _fidelity!.Record(new ReplayBinding(name, ReplayBindingKind.Live, recorded?.Index, recorded?.Data.Input, input)
+                    { DeclaredType = conflictingType });
             }
             else if (recorded != null)
             {
                 var kind = exact ? ReplayBindingKind.Matched : ReplayBindingKind.Diverged;
-                _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input));
+                _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input)
+                    { DeclaredType = conflictingType });
 
                 var mock = recorded.Data.Output;
                 T result;
@@ -107,7 +124,7 @@ public class VevalExecutionContext
             }
         }
 
-        var s = new Step(name, null) { Input = input };
+        var s = new Step(name, null) { Input = input, Type = effectiveType ?? StepType.Custom };
         _steps.Add(s);
         var handle = new StepHandle(s);
         try
@@ -122,6 +139,8 @@ public class VevalExecutionContext
             throw;
         }
     }
+
+    private static readonly StepOptions NoOptions = new();
 
     public void SetMetadata(string key, object value) => _metadata[key] = value;
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 import inspect
 import json
 from typing import Any, Callable, Awaitable, Optional, TypeVar, TYPE_CHECKING
-from ._step import Step, StepHandle
+from ._step import Step, StepHandle, StepOptions
 from ._fidelity import (
     DIVERGED, LIVE, MATCHED, STOP, STOP_DIVERGED, STOP_NO_RECORDING,
     ReplayBinding, ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStoppedError, UnusedRecording,
@@ -98,12 +98,14 @@ class VevalExecutionContext:
         name: str,
         input: Any,
         step: Callable[..., Awaitable[T]],
+        options: Optional[StepOptions] = None,
     ) -> T:
-        served, output = self._serve_from_recording(name, input)
+        """options: settings known before the step runs, such as its type (StepOptions.type)."""
+        served, output, step_type = self._serve_from_recording(name, input, options)
         if served:
             return output
 
-        s, handle = self._start_step(name, input)
+        s, handle = self._start_step(name, input, step_type)
         try:
             result = await (step(handle) if _takes_handle(step) else step())
             s.complete(result)
@@ -112,13 +114,15 @@ class VevalExecutionContext:
             s.fail(str(ex))
             raise
 
-    def track_step(self, name: str, input: Any, step: Callable[..., T]) -> T:
+    def track_step(
+        self, name: str, input: Any, step: Callable[..., T], options: Optional[StepOptions] = None,
+    ) -> T:
         """Synchronous track_step_async, for a step whose work is a plain function. Replays the same way."""
-        served, output = self._serve_from_recording(name, input)
+        served, output, step_type = self._serve_from_recording(name, input, options)
         if served:
             return output
 
-        s, handle = self._start_step(name, input)
+        s, handle = self._start_step(name, input, step_type)
         try:
             result = _not_awaitable(step(handle) if _takes_handle(step) else step(), "track_step_async")
             s.complete(result)
@@ -127,17 +131,24 @@ class VevalExecutionContext:
             s.fail(str(ex))
             raise
 
-    def _start_step(self, name: str, input: Any) -> tuple[Step, StepHandle]:
+    def _start_step(self, name: str, input: Any, step_type: Optional[str]) -> tuple[Step, StepHandle]:
         s = Step(name)
         s.input = input
+        s.type = step_type or "custom"
         self._steps.append(s)
         return s, StepHandle(s)
 
-    def _serve_from_recording(self, name: str, input: Any) -> tuple[bool, Any]:
-        """In a replay, binds the call to a recording. Returns (True, recorded output) when the step is served
-        from the recording, or (False, None) when it should run."""
+    def _serve_from_recording(
+        self, name: str, input: Any, options: Optional[StepOptions],
+    ) -> tuple[bool, Any, Optional[str]]:
+        """In a replay, binds the call to a recording. Returns (True, recorded output, type) when the step is served
+        from the recording, or (False, None, type) when it should run. type is the step's type: the recorded one,
+        else the call site's."""
+        if options is not None and not isinstance(options, StepOptions):
+            raise TypeError(f"track_step options must be a StepOptions, not {type(options).__name__}")
+        declared_type = options.type if options is not None else None
         if self._recorded is None:
-            return False, None
+            return False, None, declared_type
         assert self._fidelity is not None
         # Once a live replay has stopped, nothing after it can be served truthfully, even if the agent caught the stop.
         if self._fidelity.stop is not None:
@@ -147,13 +158,19 @@ class VevalExecutionContext:
         if rule is not None and not isinstance(rule, ReplayStepRule):
             raise TypeError(f"step_rules['{name}'] must be a ReplayStepRule, not {type(rule).__name__}")
         recorded, exact = self._find_recording(name, input, rule)
-        # In live mode a model step runs for real, including extra calls of a step recorded as a model step.
         recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
-        run_live = self._live_model_steps and recorded_type == "llm"
+        # The recording knows what the step was; the call site's type only fills in for a step it never contained.
+        effective_type = recorded_type or declared_type
+        # In live mode a model step runs for real, including extra calls of a step recorded as a model step and
+        # model steps the recording never contained.
+        run_live = self._live_model_steps and effective_type == "llm"
+        conflicting_type = (
+            declared_type if recorded_type and declared_type and declared_type != recorded_type else None
+        )
 
         if recorded is None and not run_live and self._strict_mock_mode:
             if self._live_model_steps:
-                raise self._stop_at(name, STOP_NO_RECORDING, None, input, recorded_type)
+                raise self._stop_at(name, STOP_NO_RECORDING, None, input, effective_type)
             available = ", ".join(dict.fromkeys(r.data.name for r in self._recorded if not r.consumed))
             raise RuntimeError(
                 f"Replay mode: no mock output for step '{name}'. "
@@ -164,7 +181,7 @@ class VevalExecutionContext:
         # A live model handed a recording from another path would reason over a page it never reached.
         if (self._live_model_steps and not run_live and recorded is not None and not exact
                 and self._stops_on_divergence(rule, recorded.data.type)):
-            raise self._stop_at(name, STOP_DIVERGED, recorded.data.input, input, recorded_type)
+            raise self._stop_at(name, STOP_DIVERGED, recorded.data.input, input, effective_type)
 
         if recorded is not None:
             recorded.consumed = True
@@ -172,13 +189,14 @@ class VevalExecutionContext:
         if run_live:
             self._fidelity._record(ReplayBinding(
                 name, LIVE, recorded.index if recorded else None, recorded.data.input if recorded else None, input,
+                conflicting_type,
             ))
-            return False, None
+            return False, None, effective_type
         if recorded is None:
-            return False, None
+            return False, None, effective_type
 
         self._fidelity._record(ReplayBinding(
-            name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input,
+            name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input, conflicting_type,
         ))
         mock = recorded.data.output
         s = Step(name)
@@ -188,7 +206,7 @@ class VevalExecutionContext:
         s.metadata["_source"] = "replay"
         s.complete(mock)
         self._steps.append(s)
-        return True, mock
+        return True, mock, effective_type
 
     def set_metadata(self, key: str, value: Any) -> None:
         self._metadata[key] = value

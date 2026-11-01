@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ReplayOptions, ReplayStoppedError, TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { ReplayOptions, ReplayStoppedError, StepType, TraceAssert, TraceData, VevalExecutionContext } from "../src";
 import { recorded, sdk, testSdk } from "./helpers";
 
 // Live replay: model steps run for real, every other step is served from the recording.
@@ -282,4 +282,69 @@ test("scenario: an inconclusive item is counted apart, and an item rule replaces
   assert.equal(result.results[0].inconclusive!.step_name, "fill");
   assert.equal(result.results[0].passed, false);
   assert.equal(result.results[1].passed, true, result.results[1].failures.join("; "));
+});
+
+// VEV-37: the call site can say a step is a model call before it runs.
+
+test("live replay runs a model step the recording never contained when the call site says llm", async () => {
+  let extracted = false;
+  const result = await sdk().replayAsync(briefingTrace(), async (ctx) => {
+    const briefing = await briefingAgent(PROMPT)(ctx);
+    await ctx.trackStepAsync("extraction", briefing, async () => { extracted = true; return "Dentist"; }, { type: StepType.Llm });
+    return briefing;
+  }, { live_model_steps: true, assertions: [TraceAssert.outputContains("OVERDUE")] });
+
+  assert.equal(result.outcome, "passed", result.inconclusive?.message);
+  assert.equal(extracted, true, "a model step runs live in a live replay");
+  const last = result.fidelity!.bindings.at(-1)!;
+  assert.deepEqual([last.step_name, last.kind, last.recorded_index], ["extraction", "live", null]);
+  assert.equal(result.replayed_context!.steps.at(-1)!.type, "llm");
+});
+
+for (const type of [undefined, "tool"]) {
+  test(`live replay still stops on an unrecorded step marked ${type ?? "nothing"}`, async () => {
+    let ran = false;
+    const result = await sdk().replayAsync(briefingTrace(), async (ctx) => {
+      await briefingAgent(PROMPT)(ctx);
+      return ctx.trackStepAsync("charge_card", 42, async () => { ran = true; return "ok"; }, { type });
+    }, { live_model_steps: true, assertions: [] });
+
+    assert.equal(ran, false);
+    assert.deepEqual([result.inconclusive!.step_name, result.inconclusive!.reason], ["charge_card", "no_recording"]);
+  });
+}
+
+test("live replay: the recorded type wins over the call site, and the conflict is reported", async () => {
+  let portalVisits = 0;
+  const result = await sdk().replayAsync(briefingTrace(), async (ctx) => {
+    // A mislabelled tool call: the recording knows visit_portal is a tool, so it is still served, not run.
+    await ctx.trackStepAsync("visit_portal", "today", async () => { portalVisits++; return "live"; }, { type: StepType.Llm });
+    return ctx.trackStepAsync("write_briefing", PROMPT, async () => fakeModel(PROMPT));
+  }, { live_model_steps: true, assertions: [] });
+
+  assert.equal(portalVisits, 0);
+  assert.equal(result.outcome, "passed", result.failures.join("; "));
+  const [portal, briefing] = result.fidelity!.bindings;
+  assert.deepEqual([portal.kind, portal.declared_type], ["matched", "llm"]);
+  assert.equal(briefing.declared_type, null, "no type was declared at that call site");
+});
+
+test("mocked replay still refuses an unrecorded model step", async () => {
+  let called = false;
+  const result = await sdk().replayAsync(briefingTrace(), async (ctx) => {
+    await briefingAgent(PROMPT)(ctx);
+    return ctx.trackStepAsync("extraction", "x", async () => { called = true; return "y"; }, { type: StepType.Llm });
+  }, { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(called, false, "mocked replay never makes a model call");
+  assert.ok(result.failures.some((f) => f.includes("no mock output for step 'extraction'")), result.failures.join("; "));
+});
+
+test("a recorded run carries the call-site type, and setMeta still overrides it", async () => {
+  const ctx = new VevalExecutionContext("tr_x", null);
+  await ctx.trackStepAsync("extraction", "x", async () => "y", { type: StepType.Llm });
+  await ctx.trackStepAsync("lookup", "x", async (h) => { h.setMeta("type", "tool"); return "y"; }, { type: StepType.Llm });
+  await ctx.trackStepAsync("plain", "x", async () => "y");
+
+  assert.deepEqual(ctx.steps.map((s) => s.type), ["llm", "tool", "custom"]);
 });

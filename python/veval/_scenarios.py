@@ -9,6 +9,16 @@ if TYPE_CHECKING:
 
 
 @dataclass
+class ScenarioOptions:
+    """Settings for every item of a scenario run (run_scenario_async)."""
+    # Replay every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps; this is the switch
+    # for items loaded from the dashboard. VevalTestSdk always replays mocked.
+    mock_model_steps: bool = False
+    # ReplayOptions.step_rules for every trace-backed item; an item's own entry for the same step replaces it.
+    step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
+
+
+@dataclass
 class ScenarioItem:
     name: Optional[str] = None
     trace_id: Optional[str] = None
@@ -16,8 +26,8 @@ class ScenarioItem:
     assertions: list[ITraceAssertion] = field(default_factory=list)
     # For a trace-backed item: serve model steps from the recording too (mocked replay) instead of running
     # them live. Cheaper and deterministic, so it suits code changes, but it can't catch a prompt regression.
-    # VevalTestSdk always replays mocked; for items loaded from the dashboard, pass mock_model_steps=True to
-    # run_scenario_async.
+    # VevalTestSdk always replays mocked; for items loaded from the dashboard, pass
+    # ScenarioOptions(mock_model_steps=True) to run_scenario_async.
     mock_model_steps: bool = False
     # For a trace-backed item: ReplayOptions.step_rules for its replay. Replaces the scenario-level rule of the same step.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)

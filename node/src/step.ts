@@ -76,3 +76,24 @@ export class StepHandle {
     }
   }
 }
+
+/** Step types Veval knows. `Step.type` is a string, so these are its usual values. */
+export const StepType = {
+  /** A model call. Live replay runs it for real. */
+  Llm: "llm",
+  /** A tool call. Replay serves it from the recording, and a live replay stops when its input diverges. */
+  Tool: "tool",
+  /** Anything else; the default. */
+  Custom: "custom",
+} as const;
+
+/** Settings for one step, given where the step is called. */
+export interface StepOptions {
+  /**
+   * The step's type (`StepType`), known before the step runs. A live replay uses it for a step the recording never
+   * contained: a model step (`"llm"`) then runs live instead of stopping the replay. When the recording has the step,
+   * its recorded type wins, and a different type here is reported on the binding (`declared_type`). New recordings
+   * carry this type; `setMeta("type", …)` inside the step still overrides it.
+   */
+  type?: string;
+}

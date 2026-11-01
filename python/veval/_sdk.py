@@ -13,7 +13,7 @@ from ._tracing import (
     ReplayOptions, ReplayResult,
 )
 from ._assertions import ITraceAssertion
-from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
+from ._scenarios import ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult
 from ._fidelity import ReplayStepRule
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
@@ -212,13 +212,12 @@ class VevalSdk:
         agent: Callable[[VevalExecutionContext], T],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
-        mock_model_steps: bool = False,
-        step_rules: Optional[dict[str, ReplayStepRule]] = None,
+        options: Optional[ScenarioOptions] = None,
     ) -> ScenarioRunResult:
         """Synchronous run_scenario_async, for an agent that is a plain function. The scenario runs on a private
         event loop, so call this from synchronous code."""
         return _run_sync(
-            self.run_scenario_async(scenario_name, agent, scenario_assertions, items, mock_model_steps, step_rules),
+            self.run_scenario_async(scenario_name, agent, scenario_assertions, items, options),
             "run_scenario_async",
         )
 
@@ -228,12 +227,11 @@ class VevalSdk:
         agent: Callable[[VevalExecutionContext], Union[Awaitable[T], T]],
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
-        mock_model_steps: bool = False,
-        step_rules: Optional[dict[str, ReplayStepRule]] = None,
+        options: Optional[ScenarioOptions] = None,
     ) -> ScenarioRunResult:
-        """agent may be a coroutine function or a plain function. mock_model_steps replays every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps;
-        it is the switch for items loaded from the dashboard. step_rules are ReplayOptions.step_rules for every
-        trace-backed item; an item's own entry for the same step replaces the scenario's."""
+        """agent may be a coroutine function or a plain function. options holds settings for every item: fully
+        mocked replay and step rules (ScenarioOptions)."""
+        options = _scenario_options(options)
         if items is None:
             raw_items = await self._client.get_scenario_items_async(scenario_name)
             resolved_items = [
@@ -261,7 +259,7 @@ class VevalSdk:
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
-                        _scenario_replay_options(item, mock_model_steps, effective_assertions, step_rules),
+                        _scenario_replay_options(item, options, effective_assertions),
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.inconclusive = replay_result.inconclusive
@@ -477,19 +475,30 @@ def _replay_result(
 
 def _scenario_replay_options(
     item: ScenarioItem,
-    mock_model_steps: bool,
+    options: ScenarioOptions,
     assertions: list,
-    step_rules: Optional[dict[str, ReplayStepRule]] = None,
 ) -> ReplayOptions:
     """How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
     the whole scenario opts into mocked replay."""
-    mocked = mock_model_steps or item.mock_model_steps
+    mocked = options.mock_model_steps or item.mock_model_steps
     return ReplayOptions(
         mock_llm_responses=mocked,
         live_model_steps=not mocked,
         assertions=assertions,
-        step_rules=_merge_step_rules(step_rules, item.step_rules),
+        step_rules=_merge_step_rules(options.step_rules, item.step_rules),
     )
+
+
+def _scenario_options(options: Optional[ScenarioOptions]) -> ScenarioOptions:
+    """The scenario's options, checked: a bool here is the old mock_model_steps argument."""
+    if options is None:
+        return ScenarioOptions()
+    if not isinstance(options, ScenarioOptions):
+        raise TypeError(
+            f"run_scenario_async options must be a ScenarioOptions, not {type(options).__name__}; "
+            "for a fully mocked replay pass ScenarioOptions(mock_model_steps=True)"
+        )
+    return options
 
 
 def _merge_step_rules(

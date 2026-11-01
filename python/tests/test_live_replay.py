@@ -10,8 +10,8 @@ os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from veval import (  # noqa: E402
-    ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, StepData, TraceAssert, TraceData, VevalOptions,
-    VevalSdk, VevalTestSdk,
+    ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
+    TraceAssert, TraceData, VevalExecutionContext, VevalOptions, VevalSdk, VevalTestSdk,
 )
 
 PROMPT = "List overdue items first."
@@ -64,7 +64,7 @@ def run_scenario(prompt, item_mock=False, scenario_mock=False, on_portal_visit=N
     veval.get_trace_async = get_trace
     return asyncio.run(veval.run_scenario_async(
         "briefing", briefing_agent(prompt, on_portal_visit), [TraceAssert.output_contains("OVERDUE")],
-        [ScenarioItem(trace_id=trace.trace_id, mock_model_steps=item_mock)], mock_model_steps=scenario_mock,
+        [ScenarioItem(trace_id=trace.trace_id, mock_model_steps=item_mock)], ScenarioOptions(mock_model_steps=scenario_mock),
     ))
 
 
@@ -347,7 +347,7 @@ def test_scenario_counts_an_inconclusive_item_apart_and_an_item_rule_replaces_th
             ScenarioItem(name="served", trace_id=trace.trace_id,
                          step_rules={"fill": ReplayStepRule(on_divergence="serve")}),
         ],
-        step_rules={"fill": ReplayStepRule(on_divergence="stop")},
+        ScenarioOptions(step_rules={"fill": ReplayStepRule(on_divergence="stop")}),
     ))
 
     assert not result.passed
@@ -355,4 +355,88 @@ def test_scenario_counts_an_inconclusive_item_apart_and_an_item_rule_replaces_th
     assert result.results[0].inconclusive.step_name == "fill"
     assert not result.results[0].passed
     assert result.results[1].passed, result.results[1].failures
+
+
+# VEV-37: the call site can say a step is a model call before it runs.
+
+def test_live_replay_runs_a_model_step_the_recording_never_contained_when_the_call_site_says_llm():
+    extracted = []
+
+    async def agent(ctx):
+        briefing = await briefing_agent(PROMPT)(ctx)
+        await ctx.track_step_async(
+            "extraction", briefing, returning("Dentist", lambda: extracted.append(1)), StepOptions(type=StepType.LLM))
+        return briefing
+
+    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(
+        live_model_steps=True, assertions=[TraceAssert.output_contains("OVERDUE")],
+    )))
+    assert result.outcome == "passed", result.inconclusive and result.inconclusive.message
+    assert extracted == [1]  # a model step runs live in a live replay
+    last = result.fidelity.bindings[-1]
+    assert (last.step_name, last.kind, last.recorded_index) == ("extraction", "live", None)
+    assert result.replayed_context.steps[-1].type == "llm"
+
+
+@pytest.mark.parametrize("step_type", [None, "tool"])
+def test_live_replay_still_stops_on_an_unrecorded_step_not_marked_llm(step_type):
+    ran = []
+
+    async def agent(ctx):
+        await briefing_agent(PROMPT)(ctx)
+        return await ctx.track_step_async("charge_card", 42, returning("ok", lambda: ran.append(1)), StepOptions(type=step_type))
+
+    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(live_model_steps=True)))
+    assert ran == []
+    assert (result.inconclusive.step_name, result.inconclusive.reason) == ("charge_card", "no_recording")
+
+
+def test_live_replay_the_recorded_type_wins_over_the_call_site_and_the_conflict_is_reported():
+    visits = []
+
+    async def agent(ctx):
+        # A mislabelled tool call: the recording knows visit_portal is a tool, so it is still served, not run.
+        await ctx.track_step_async(
+            "visit_portal", "today", returning("live", lambda: visits.append(1)), StepOptions(type=StepType.LLM))
+        return await ctx.track_step_async("write_briefing", PROMPT, returning(fake_model(PROMPT)))
+
+    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(live_model_steps=True)))
+    assert visits == []
+    assert result.outcome == "passed", result.failures
+    portal, briefing = result.fidelity.bindings
+    assert (portal.kind, portal.declared_type) == ("matched", "llm")
+    assert briefing.declared_type is None  # no type was declared at that call site
+
+
+def test_mocked_replay_still_refuses_an_unrecorded_model_step():
+    called = []
+
+    async def agent(ctx):
+        await briefing_agent(PROMPT)(ctx)
+        return await ctx.track_step_async(
+            "extraction", "x", returning("y", lambda: called.append(1)), StepOptions(type=StepType.LLM))
+
+    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(mock_llm_responses=True)))
+    assert called == []  # mocked replay never makes a model call
+    assert any("no mock output for step 'extraction'" in f for f in result.failures), result.failures
+
+
+def test_a_recorded_run_carries_the_call_site_type_and_set_meta_still_overrides_it():
+    ctx = VevalExecutionContext("tr_x", None)
+
+    def lookup(handle):
+        handle.set_meta("type", "tool")
+        return "y"
+
+    ctx.track_step("extraction", "x", lambda: "y", StepOptions(type=StepType.LLM))
+    ctx.track_step("lookup", "x", lookup, StepOptions(type=StepType.LLM))
+    ctx.track_step("plain", "x", lambda: "y")
+    assert [s.type for s in ctx.steps] == ["llm", "tool", "custom"]
+
+
+def test_options_reject_the_old_positional_arguments():
+    with pytest.raises(TypeError):
+        StepOptions(type=1)
+    with pytest.raises(TypeError):
+        asyncio.run(sdk().run_scenario_async("s", lambda ctx: "x", [], [], True))
 

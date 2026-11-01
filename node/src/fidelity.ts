@@ -14,6 +14,11 @@ export interface ReplayBinding {
   recorded_index: number | null;
   recorded_input: unknown;
   actual_input: unknown;
+  /**
+   * The type the call site gave (`StepOptions.type`) when it differs from the recorded type, or null. The recorded
+   * type won: a mislabelled call can't turn a recorded tool step live.
+   */
+  declared_type?: string | null;
 }
 
 /** What a live replay does with a call whose input matches no unused recording of its step. */

@@ -1,4 +1,4 @@
-import { Step, StepHandle } from "./step";
+import { Step, StepHandle, StepOptions } from "./step";
 import { StepData, TraceData } from "./tracing";
 import { ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStopReason, ReplayStoppedError } from "./fidelity";
 import { canonicalize } from "./snapshots";
@@ -131,8 +131,11 @@ export class VevalExecutionContext {
   async trackStepAsync<T>(
     name: string,
     input: unknown,
-    fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>)
+    fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>),
+    options?: StepOptions
   ): Promise<T> {
+    const declaredType = options?.type ?? null;
+    let effectiveType: string | null = declaredType;
     if (this._recorded !== null) {
       // Once a live replay has stopped, nothing after it can be served truthfully, even if the agent caught the stop.
       const stopped = this._fidelity!.stop;
@@ -141,11 +144,15 @@ export class VevalExecutionContext {
       const rule = Object.prototype.hasOwnProperty.call(this._stepRules, name) ? this._stepRules[name] : undefined;
       const { recorded, exact } = this.findRecording(name, input, rule);
       const recordedType = recorded?.data.type ?? this.recordedTypeOf(name);
-      // In live mode a model step runs for real, including extra calls of a step recorded as a model step.
-      const runLive = this._liveModelSteps && recordedType === "llm";
+      // The recording knows what the step was; the call site's type only fills in for a step it never contained.
+      effectiveType = recordedType ?? declaredType;
+      // In live mode a model step runs for real, including extra calls of a step recorded as a model step and
+      // model steps the recording never contained.
+      const runLive = this._liveModelSteps && effectiveType === "llm";
+      const conflictingType = recordedType && declaredType && declaredType !== recordedType ? declaredType : null;
 
       if (recorded === null && !runLive && this._strictMockMode) {
-        if (this._liveModelSteps) throw this.stopAt(name, "no_recording", null, input, recordedType);
+        if (this._liveModelSteps) throw this.stopAt(name, "no_recording", null, input, effectiveType);
         const available = [...new Set(this._recorded.filter((r) => !r.consumed).map((r) => r.data.name))].join(", ");
         throw new Error(
           `Replay mode: no mock output for step '${name}'. ` +
@@ -156,18 +163,18 @@ export class VevalExecutionContext {
 
       // A live model handed a recording from another path would reason over a page it never reached.
       if (this._liveModelSteps && !runLive && recorded !== null && !exact && this.stopsOnDivergence(rule, recorded.data.type))
-        throw this.stopAt(name, "diverged", recorded.data.input, input, recordedType);
+        throw this.stopAt(name, "diverged", recorded.data.input, input, effectiveType);
       if (recorded !== null) recorded.consumed = true;
 
       if (runLive) {
         this._fidelity!.record({
           step_name: name, kind: "live", recorded_index: recorded?.index ?? null,
-          recorded_input: recorded?.data.input ?? null, actual_input: input,
+          recorded_input: recorded?.data.input ?? null, actual_input: input, declared_type: conflictingType,
         });
       } else if (recorded !== null) {
         this._fidelity!.record({
           step_name: name, kind: exact ? "matched" : "diverged", recorded_index: recorded.index,
-          recorded_input: recorded.data.input, actual_input: input,
+          recorded_input: recorded.data.input, actual_input: input, declared_type: conflictingType,
         });
         const mock = recorded.data.output;
         const s = new Step(name);
@@ -183,6 +190,7 @@ export class VevalExecutionContext {
 
     const s = new Step(name);
     s.input = input;
+    s.type = effectiveType ?? "custom";
     this._steps.push(s);
     const handle = new StepHandle(s);
 

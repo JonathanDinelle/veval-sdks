@@ -13,7 +13,7 @@ public class ScenarioItem
     /// For a trace-backed item: serve model steps from the recording too (mocked replay) instead of running
     /// them live. Cheaper and deterministic, so it suits code changes, but it can't catch a prompt regression.
     /// <see cref="VevalTestSdk"/> always replays mocked; for items loaded from the dashboard, pass
-    /// <c>mockModelSteps: true</c> to <c>RunScenarioAsync</c>.
+    /// <c>new ScenarioOptions { MockModelSteps = true }</c> to <c>RunScenarioAsync</c>.
     /// </summary>
     public bool MockModelSteps { get; set; }
 
