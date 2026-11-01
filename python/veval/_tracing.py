@@ -85,7 +85,7 @@ class TraceData:
 
 
 # Snapshot types live in _snapshots; re-exported here for existing imports.
-from ._fidelity import ReplayFidelity  # noqa: E402
+from ._fidelity import ReplayFidelity, ReplayStepRule, ReplayStop  # noqa: E402
 from ._snapshots import (  # noqa: E402
     SnapshotStep,
     SnapshotData,
@@ -109,6 +109,14 @@ class ReplayOptions:
     # recording, so a prompt change shows up while tools never reach a real system. Takes precedence over
     # mock_llm_responses. The replay fails if no step ran live.
     live_model_steps: bool = False
+    # Per step name: how calls match their recordings (name only, or with some input fields ignored) and, in a
+    # live replay, whether a diverged call stops the run or is served. Matching rules apply to mocked replays too.
+    step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
+    # Live replay: steps recorded with one of these types stop the run when a call diverges, unless their
+    # step_rules entry says otherwise. A stopped replay is inconclusive (ReplayResult.inconclusive): past that step
+    # the recording can't say what the real tool would have returned. Defaults to {"tool"}; other diverged steps are
+    # served the next unused recording and reported in ReplayResult.fidelity.
+    stop_on_divergence_types: set[str] = field(default_factory=lambda: {"tool"})
 
 
 @dataclass
@@ -124,7 +132,18 @@ class ReplayResult:
     recording_diff: Optional[SnapshotDiff] = None
     # How each call was bound to the recording; set for mocked and live replays (mock_llm_responses or live_model_steps).
     fidelity: Optional[ReplayFidelity] = None
+    # Where a live replay stopped because a call left the recording, or None. When set, assertions were not evaluated
+    # and failures is empty: the replay can't back up a pass or a fail.
+    inconclusive: Optional[ReplayStop] = None
+
+    @property
+    def outcome(self) -> str:
+        """How the replay ended: "passed", "failed", or "inconclusive" (a live replay left its recording and stopped)."""
+        if self.inconclusive is not None:
+            return "inconclusive"
+        return "passed" if not self.failures else "failed"
 
     @property
     def passed(self) -> bool:
-        return len(self.failures) == 0
+        """True only when the replay passed; False when it failed or was inconclusive."""
+        return self.outcome == "passed"

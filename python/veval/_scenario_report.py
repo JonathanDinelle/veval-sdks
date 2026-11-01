@@ -25,12 +25,14 @@ class ScenarioReport:
         await self._client.post_scenario_run_async(self._scenario_name, {
             "passed": result.passed,
             "pass_count": result.pass_count,
-            "fail_count": result.fail_count,
+            # The dashboard has no inconclusive state yet (VEV-39): an inconclusive item is posted as not passed,
+            # with its stop as the reason.
+            "fail_count": result.fail_count + result.inconclusive_count,
             "results": [
                 {
                     "name": r.item.name or r.item.trace_id or unnamed_item,
                     "passed": r.passed,
-                    "failures": r.failures,
+                    "failures": [r.inconclusive.message] if r.inconclusive is not None else r.failures,
                     "judgments": r.context.judgments if r.context else [],
                 }
                 for r in result.results

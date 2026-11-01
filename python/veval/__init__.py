@@ -7,7 +7,14 @@ from ._tracing import (
     ReplayOptions,
     ReplayResult,
 )
-from ._fidelity import ReplayFidelity, ReplayBinding, UnusedRecording
+from ._fidelity import (
+    ReplayFidelity,
+    ReplayBinding,
+    UnusedRecording,
+    ReplayStepRule,
+    ReplayStop,
+    ReplayStoppedError,
+)
 from ._snapshots import (
     SnapshotStep,
     SnapshotData,
@@ -42,6 +49,9 @@ __all__ = [
     "ReplayFidelity",
     "ReplayBinding",
     "UnusedRecording",
+    "ReplayStepRule",
+    "ReplayStop",
+    "ReplayStoppedError",
     "ITraceAssertion",
     "TraceAssert",
     "ScenarioItem",

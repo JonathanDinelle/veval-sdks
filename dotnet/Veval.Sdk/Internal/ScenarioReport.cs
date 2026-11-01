@@ -30,12 +30,14 @@ internal sealed class ScenarioReport
         {
             passed = result.Passed,
             pass_count = result.PassCount,
-            fail_count = result.FailCount,
+            // The dashboard has no inconclusive state yet (VEV-39): an inconclusive item is posted as not passed,
+            // with its stop as the reason.
+            fail_count = result.FailCount + result.InconclusiveCount,
             results = result.Results.Select(r => new
             {
                 name = r.Item.Name ?? r.Item.TraceId ?? unnamedItem,
                 passed = r.Passed,
-                failures = r.Failures,
+                failures = r.Inconclusive is { } stop ? new List<string> { stop.Message } : r.Failures,
                 judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
             }),
         });

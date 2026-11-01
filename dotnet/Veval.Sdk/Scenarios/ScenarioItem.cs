@@ -16,4 +16,10 @@ public class ScenarioItem
     /// <c>mockModelSteps: true</c> to <c>RunScenarioAsync</c>.
     /// </summary>
     public bool MockModelSteps { get; set; }
+
+    /// <summary>
+    /// For a trace-backed item: <see cref="ReplayOptions.StepRules"/> for its replay. Replaces the scenario-level rule of
+    /// the same step.
+    /// </summary>
+    public Dictionary<string, ReplayStepRule> StepRules { get; set; } = new();
 }

@@ -10,7 +10,8 @@ from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
-from ._sdk import VevalSdk, _call_agent, _evaluate, _missing_trace_message
+from ._sdk import VevalSdk, _call_agent, _evaluate, _merge_step_rules, _missing_trace_message
+from ._fidelity import ReplayStepRule
 
 T = TypeVar("T")
 
@@ -137,6 +138,7 @@ class VevalTestSdk(VevalSdk):
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
         mock_model_steps: bool = False,
+        step_rules: Optional[dict[str, ReplayStepRule]] = None,
     ) -> ScenarioRunResult:
         resolved_items = items or []
         scenario_result = ScenarioRunResult()
@@ -154,9 +156,14 @@ class VevalTestSdk(VevalSdk):
                     replay_result = await self.replay_async(
                         trace, agent,
                         # The test double never makes live model calls: trace-backed items always replay mocked.
-                        ReplayOptions(mock_llm_responses=True, assertions=effective_assertions),
+                        ReplayOptions(
+                            mock_llm_responses=True,
+                            assertions=effective_assertions,
+                            step_rules=_merge_step_rules(step_rules, item.step_rules),
+                        ),
                     )
                     item_result.failures.extend(replay_result.failures)
+                    item_result.inconclusive = replay_result.inconclusive
                     item_result.context = replay_result.replayed_context
 
                     if replay_result.replayed_context:

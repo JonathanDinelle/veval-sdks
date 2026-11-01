@@ -11,6 +11,7 @@ import {
   SnapshotPayloads,
 } from "./snapshots";
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
+import { ReplayStepRule } from "./fidelity";
 import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult } from "./scenarios";
 import { VevalHttpClient } from "./http-client";
 import { ScenarioReport } from "./scenario-report";
@@ -25,7 +26,19 @@ import { ScenarioReport } from "./scenario-report";
  */
 export function scenarioReplayOptions(item: ScenarioItem, options: ScenarioOptions | undefined, assertions: ITraceAssertion[]): ReplayOptions {
   const mocked = !!(options?.mock_model_steps || item.mock_model_steps);
-  return { mock_llm_responses: mocked, live_model_steps: !mocked, assertions };
+  return {
+    mock_llm_responses: mocked,
+    live_model_steps: !mocked,
+    assertions,
+    step_rules: mergeStepRules(options?.step_rules, item.step_rules),
+  };
+}
+
+/** The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step. */
+export function mergeStepRules(
+  scenarioRules: Record<string, ReplayStepRule> | undefined, itemRules: Record<string, ReplayStepRule> | undefined
+): Record<string, ReplayStepRule> {
+  return { ...(scenarioRules ?? {}), ...(itemRules ?? {}) };
 }
 
 export function missingTraceMessage(traceId: string): string {
@@ -136,9 +149,9 @@ export class VevalSdk {
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
     markAsReplay(ctx);
     if (options?.live_model_steps) {
-      ctx.loadMockOutputs(trace, true, true);
+      ctx.loadMockOutputs(trace, true, true, options);
     } else if (options?.mock_llm_responses) {
-      ctx.loadMockOutputs(trace);
+      ctx.loadMockOutputs(trace, true, false, options);
     }
 
     const startedAt = new Date();
@@ -155,23 +168,35 @@ export class VevalSdk {
 
     const completedAt = new Date();
     const failures: string[] = [];
-    if (error) failures.push(`Replay threw exception: ${error}`);
-    const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
-    if (bindingFailure) failures.push(bindingFailure);
-    for (const assertion of options?.assertions ?? []) {
-      const failure = await assertion.evaluate(ctx);
-      if (failure) failures.push(failure);
-    }
-
     let recordingDiff: SnapshotDiff | null = null;
-    if (options?.compare_with_recording) {
-      recordingDiff = SnapshotComparer.compare(SnapshotDataHelper.fromTrace(trace), ctx, options.compare_with_recording);
-      if (recordingDiff.has_changes)
-        failures.push("Replay drifted from its recording — " + recordingDiff.summary(`recording ${trace.trace_id}`));
+    const stop = ctx.replayFidelity?.stop ?? null;
+
+    // A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
+    // after the stop (caught it, threw something else) is a consequence of the stop, not a finding.
+    if (stop) {
+      status = "error";
+      error = stop.message;
+    } else {
+      if (error) failures.push(`Replay threw exception: ${error}`);
+      const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
+      if (bindingFailure) failures.push(bindingFailure);
+      for (const assertion of options?.assertions ?? []) {
+        const failure = await assertion.evaluate(ctx);
+        if (failure) failures.push(failure);
+      }
+
+      if (options?.compare_with_recording) {
+        recordingDiff = SnapshotComparer.compare(SnapshotDataHelper.fromTrace(trace), ctx, options.compare_with_recording);
+        if (recordingDiff.has_changes)
+          failures.push("Replay drifted from its recording — " + recordingDiff.summary(`recording ${trace.trace_id}`));
+      }
     }
 
+    const outcome = stop ? "inconclusive" : failures.length === 0 ? "passed" : "failed";
     return {
-      passed: failures.length === 0,
+      passed: outcome === "passed",
+      outcome,
+      inconclusive: stop,
       failures,
       replayed_context: ctx,
       recording_diff: recordingDiff,
@@ -208,6 +233,7 @@ export class VevalSdk {
           const replayResult = await this.replayAsync(trace, agent, scenarioReplayOptions(item, options, effectiveAssertions));
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
+          itemResult.inconclusive = replayResult.inconclusive;
           itemResult.context = replayResult.replayed_context ?? undefined;
 
           if (replayResult.replayed_context) {

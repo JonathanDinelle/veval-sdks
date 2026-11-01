@@ -145,54 +145,17 @@ public class VevalTestSdk : IVevalSdk
         return diff;
     }
 
-    public async Task<ReplayResult> ReplayAsync<T>(
-        TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
-    {
-        var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input) { IsReplay = true };
-        if (options.LiveModelSteps)
-            ctx.LoadMockOutputs(trace, liveModelSteps: true);
-        else if (options.MockLlmResponses)
-            ctx.LoadMockOutputs(trace);
-
-        var startedAt = DateTime.UtcNow;
-        string status = "success";
-        string? error = null;
-        object? output = null;
-
-        try { output = await callback(ctx); }
-        catch (Exception ex) { status = "error"; error = ex.Message; }
-
-        var failures = new List<string>();
-        if (error != null) failures.Add($"Replay threw exception: {error}");
-        if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
-            failures.Add(bindingFailure);
-        foreach (var a in options.Assertions)
-        {
-            var f = await a.EvaluateAsync(ctx);
-            if (f != null) failures.Add(f);
-        }
-        var recordingDiff = ReplayRecordingCheck.Evaluate(trace, ctx, options, failures);
-
-        return new ReplayResult
-        {
-            Failures = failures,
-            ReplayedContext = ctx,
-            Output = output,
-            StartedAt = startedAt,
-            CompletedAt = DateTime.UtcNow,
-            Status = status,
-            Error = error,
-            RecordingDiff = recordingDiff,
-            Fidelity = ctx.ReplayFidelity,
-        };
-    }
+    public Task<ReplayResult> ReplayAsync<T>(
+        TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options) =>
+        ReplayRunner.RunAsync(trace, callback, options);
 
     public async Task<ScenarioRunResult> RunScenarioAsync<T>(
         string scenarioName,
         Func<VevalExecutionContext, Task<T>> agent,
         ITraceAssertion[] scenarioAssertions,
         ScenarioItem[]? items = null,
-        bool mockModelSteps = false)
+        bool mockModelSteps = false,
+        IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null)
     {
         var scenarioResult = new ScenarioRunResult();
         var report = new ScenarioReport(_reportingClient, scenarioName);
@@ -217,8 +180,10 @@ public class VevalTestSdk : IVevalSdk
                     {
                         MockLlmResponses = true,
                         Assertions = effectiveAssertions,
+                        StepRules = VevalSdk.MergeStepRules(stepRules, item.StepRules),
                     });
                     itemResult.Failures.AddRange(replayResult.Failures);
+                    itemResult.Inconclusive = replayResult.Inconclusive;
                     itemResult.Context = replayResult.ReplayedContext;
 
                     var replayCtx = replayResult.ReplayedContext!;

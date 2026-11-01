@@ -14,6 +14,7 @@ from ._tracing import (
 )
 from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioRunResult, ItemRunResult
+from ._fidelity import ReplayStepRule
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
 from ._snapshots import save_from_context_payload, save_from_trace_payload, snapshot_run_payload
@@ -176,7 +177,7 @@ class VevalSdk:
             error = str(ex)
 
         completed_at = datetime.now(timezone.utc)
-        assertion_failures = await _evaluate(options.assertions, ctx)
+        assertion_failures = [] if _stopped(ctx) else await _evaluate(options.assertions, ctx)
         return _replay_result(trace, options, ctx, output, error, started_at, completed_at, assertion_failures)
 
     def replay(
@@ -199,7 +200,10 @@ class VevalSdk:
             error = str(ex)
 
         completed_at = datetime.now(timezone.utc)
-        assertion_failures = _run_sync(_evaluate(options.assertions, ctx), "replay_async") if options.assertions else []
+        assertion_failures = (
+            _run_sync(_evaluate(options.assertions, ctx), "replay_async")
+            if options.assertions and not _stopped(ctx) else []
+        )
         return _replay_result(trace, options, ctx, output, error, started_at, completed_at, assertion_failures)
 
     def run_scenario(
@@ -209,11 +213,12 @@ class VevalSdk:
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
         mock_model_steps: bool = False,
+        step_rules: Optional[dict[str, ReplayStepRule]] = None,
     ) -> ScenarioRunResult:
         """Synchronous run_scenario_async, for an agent that is a plain function. The scenario runs on a private
         event loop, so call this from synchronous code."""
         return _run_sync(
-            self.run_scenario_async(scenario_name, agent, scenario_assertions, items, mock_model_steps),
+            self.run_scenario_async(scenario_name, agent, scenario_assertions, items, mock_model_steps, step_rules),
             "run_scenario_async",
         )
 
@@ -224,9 +229,11 @@ class VevalSdk:
         scenario_assertions: list[ITraceAssertion],
         items: Optional[list[ScenarioItem]] = None,
         mock_model_steps: bool = False,
+        step_rules: Optional[dict[str, ReplayStepRule]] = None,
     ) -> ScenarioRunResult:
         """agent may be a coroutine function or a plain function. mock_model_steps replays every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps;
-        it is the switch for items loaded from the dashboard."""
+        it is the switch for items loaded from the dashboard. step_rules are ReplayOptions.step_rules for every
+        trace-backed item; an item's own entry for the same step replaces the scenario's."""
         if items is None:
             raw_items = await self._client.get_scenario_items_async(scenario_name)
             resolved_items = [
@@ -254,9 +261,10 @@ class VevalSdk:
                 else:
                     replay_result = await self.replay_async(
                         trace, agent,
-                        _scenario_replay_options(item, mock_model_steps, effective_assertions),
+                        _scenario_replay_options(item, mock_model_steps, effective_assertions, step_rules),
                     )
                     item_result.failures.extend(replay_result.failures)
+                    item_result.inconclusive = replay_result.inconclusive
                     item_result.context = replay_result.replayed_context
 
                     replay_ctx = replay_result.replayed_context
@@ -406,11 +414,17 @@ def _require_no_running_loop(async_name: str) -> None:
 def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionContext:
     ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
     ctx._is_replay = True
+    rules = {"step_rules": options.step_rules, "stop_on_divergence_types": options.stop_on_divergence_types}
     if options.live_model_steps:
-        ctx.load_mock_outputs(trace, live_model_steps=True)
+        ctx.load_mock_outputs(trace, live_model_steps=True, **rules)
     elif options.mock_llm_responses:
-        ctx.load_mock_outputs(trace)
+        ctx.load_mock_outputs(trace, **rules)
     return ctx
+
+
+def _stopped(ctx: VevalExecutionContext) -> bool:
+    """Whether a live replay left its recording and stopped; then its assertions are not evaluated."""
+    return ctx.replay_fidelity is not None and ctx.replay_fidelity.stop is not None
 
 
 def _replay_result(
@@ -424,24 +438,32 @@ def _replay_result(
     assertion_failures: list[str],
 ) -> ReplayResult:
     failures: list[str] = []
-    if error:
-        failures.append(f"Replay threw exception: {error}")
-    fidelity = ctx.replay_fidelity
-    binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
-    if binding_failure:
-        failures.append(binding_failure)
-    failures.extend(assertion_failures)
-
     recording_diff = None
-    if options.compare_with_recording is not None:
-        recording_diff = compare_snapshots(SnapshotData.from_trace(trace), ctx, options.compare_with_recording)
-        if recording_diff.has_changes:
-            failures.append(
-                "Replay drifted from its recording — " + recording_diff.summary(f"recording {trace.trace_id}")
-            )
+    fidelity = ctx.replay_fidelity
+    stop = fidelity.stop if fidelity is not None else None
+
+    # A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
+    # after the stop (caught it, raised something else) is a consequence of the stop, not a finding.
+    if stop is not None:
+        error = stop.message
+    else:
+        if error:
+            failures.append(f"Replay threw exception: {error}")
+        binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
+        if binding_failure:
+            failures.append(binding_failure)
+        failures.extend(assertion_failures)
+
+        if options.compare_with_recording is not None:
+            recording_diff = compare_snapshots(SnapshotData.from_trace(trace), ctx, options.compare_with_recording)
+            if recording_diff.has_changes:
+                failures.append(
+                    "Replay drifted from its recording — " + recording_diff.summary(f"recording {trace.trace_id}")
+                )
 
     return ReplayResult(
         failures=failures,
+        inconclusive=stop,
         replayed_context=ctx,
         recording_diff=recording_diff,
         fidelity=fidelity,
@@ -453,11 +475,28 @@ def _replay_result(
     )
 
 
-def _scenario_replay_options(item: ScenarioItem, mock_model_steps: bool, assertions: list) -> ReplayOptions:
+def _scenario_replay_options(
+    item: ScenarioItem,
+    mock_model_steps: bool,
+    assertions: list,
+    step_rules: Optional[dict[str, ReplayStepRule]] = None,
+) -> ReplayOptions:
     """How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
     the whole scenario opts into mocked replay."""
     mocked = mock_model_steps or item.mock_model_steps
-    return ReplayOptions(mock_llm_responses=mocked, live_model_steps=not mocked, assertions=assertions)
+    return ReplayOptions(
+        mock_llm_responses=mocked,
+        live_model_steps=not mocked,
+        assertions=assertions,
+        step_rules=_merge_step_rules(step_rules, item.step_rules),
+    )
+
+
+def _merge_step_rules(
+    scenario_rules: Optional[dict[str, ReplayStepRule]], item_rules: dict[str, ReplayStepRule],
+) -> dict[str, ReplayStepRule]:
+    """The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step."""
+    return {**(scenario_rules or {}), **item_rules}
 
 
 def _missing_trace_message(trace_id: str) -> str:

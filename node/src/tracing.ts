@@ -1,7 +1,7 @@
 import type { SnapshotDiff, SnapshotOptions } from "./snapshots";
 import { VevalExecutionContext } from "./context";
 import { ITraceAssertion } from "./assertions";
-import type { ReplayFidelity } from "./fidelity";
+import type { ReplayFidelity, ReplayStepRule, ReplayStop } from "./fidelity";
 
 export interface StepData {
   step_id: string;
@@ -58,10 +58,32 @@ export interface ReplayOptions {
    * unused recording in order) and only reported in `fidelity`.
    */
   compare_with_recording?: SnapshotOptions;
+  /**
+   * Per step name: how calls match their recordings (name only, or with some input fields ignored) and, in a
+   * live replay, whether a diverged call stops the run or is served. Matching rules apply to mocked replays too.
+   */
+  step_rules?: Record<string, ReplayStepRule>;
+  /**
+   * Live replay: steps recorded with one of these types stop the run when a call diverges, unless their
+   * `step_rules` entry says otherwise. A stopped replay is inconclusive (`ReplayResult.inconclusive`): past that
+   * step the recording can't say what the real tool would have returned. Defaults to `["tool"]`; other diverged
+   * steps are served the next unused recording and reported in `fidelity`.
+   */
+  stop_on_divergence_types?: string[];
 }
 
+/** How a replay ended. `inconclusive`: a live replay left its recording and stopped; see `ReplayResult.inconclusive`. */
+export type ReplayOutcome = "passed" | "failed" | "inconclusive";
+
 export interface ReplayResult {
+  /** True only when the replay passed; false when it failed or was inconclusive. */
   passed: boolean;
+  outcome: ReplayOutcome;
+  /**
+   * Where a live replay stopped because a call left the recording, or null. When set, assertions were not
+   * evaluated and `failures` is empty: the replay can't back up a pass or a fail.
+   */
+  inconclusive: ReplayStop | null;
   failures: string[];
   replayed_context: VevalExecutionContext | null;
   output: unknown;

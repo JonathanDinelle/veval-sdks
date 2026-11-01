@@ -1,8 +1,25 @@
 namespace Veval.Sdk;
 
+/// <summary>How a replay ended.</summary>
+public enum ReplayOutcome
+{
+    Passed,
+    Failed,
+    /// <summary>A live replay left its recording and stopped; see <see cref="ReplayResult.Inconclusive"/>.</summary>
+    Inconclusive,
+}
+
 public class ReplayResult
 {
-    public bool Passed => Failures.Count == 0;
+    /// <summary>True only when the replay passed; false when it failed or was inconclusive.</summary>
+    public bool Passed => Outcome == ReplayOutcome.Passed;
+    public ReplayOutcome Outcome =>
+        Inconclusive != null ? ReplayOutcome.Inconclusive : Failures.Count == 0 ? ReplayOutcome.Passed : ReplayOutcome.Failed;
+    /// <summary>
+    /// Where a live replay stopped because a call left the recording, or null. When set, assertions were not evaluated
+    /// and <see cref="Failures"/> is empty: the replay can't back up a pass or a fail.
+    /// </summary>
+    public ReplayStop? Inconclusive { get; set; }
     public List<string> Failures { get; set; } = new();
     public VevalExecutionContext? ReplayedContext { get; set; }
     public object? Output { get; set; }

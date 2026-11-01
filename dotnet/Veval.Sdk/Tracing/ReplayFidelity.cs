@@ -41,6 +41,10 @@ public class ReplayFidelity
     public int Live => _bindings.Count(b => b.Kind == ReplayBindingKind.Live);
     /// <summary>No call diverged and every recorded step was called. Live calls don't count against it.</summary>
     public bool IsFaithful => Diverged == 0 && _unused.Count == 0;
+    /// <summary>Where a live replay left its recording and stopped, or null when it didn't.</summary>
+    public ReplayStop? Stop { get; private set; }
+
+    internal void Stopped(ReplayStop stop) => Stop ??= stop;
 
     internal void Record(ReplayBinding binding)
     {
