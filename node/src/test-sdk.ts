@@ -1,5 +1,5 @@
 import { VevalOptions } from "./options";
-import { VevalSdk, missingTraceMessage } from "./sdk";
+import { VevalSdk, missingTraceMessage, scenarioReplayOptions } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
@@ -129,7 +129,7 @@ export class VevalTestSdk extends VevalSdk {
     agent: (ctx: VevalExecutionContext) => Promise<T>,
     scenarioAssertions: ITraceAssertion[],
     items?: ScenarioItem[],
-    _options?: ScenarioOptions
+    options?: ScenarioOptions
   ): Promise<ScenarioRunResult> {
     const resolvedItems = items ?? [];
     const results: ItemRunResult[] = [];
@@ -146,12 +146,11 @@ export class VevalTestSdk extends VevalSdk {
           itemResult.passed = false;
         } else {
           // The test double never makes live model calls: trace-backed items always replay mocked.
-          const replayResult = await this.replayAsync(trace, agent, {
-            mock_llm_responses: true,
-            assertions: effectiveAssertions,
-          } as ReplayOptions);
+          const replayResult = await this.replayAsync(trace, agent,
+            scenarioReplayOptions(item, { ...options, mock_model_steps: true }, effectiveAssertions));
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
+          itemResult.inconclusive = replayResult.inconclusive;
           itemResult.context = replayResult.replayed_context ?? undefined;
 
           if (replayResult.replayed_context) {

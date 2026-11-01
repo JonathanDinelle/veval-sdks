@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 # How a replayed call was bound to the recording:
@@ -22,6 +22,65 @@ class ReplayBinding:
     actual_input: Any
 
 
+# What a live replay does with a call whose input matches no unused recording of its step:
+#   "stop"  — stop the run at that step. The replay ends inconclusive: neither passed nor failed.
+#   "serve" — serve the next unused recording of that step and report the call as diverged in the fidelity report.
+STOP = "stop"
+SERVE = "serve"
+
+# Why a live replay stopped:
+#   "diverged"     — the call's input matched no unused recording of its step, and the step stops on divergence.
+#   "no_recording" — the recording has no unused call of that step to serve, and it isn't a model step that can run live.
+STOP_DIVERGED = "diverged"
+STOP_NO_RECORDING = "no_recording"
+
+
+@dataclass
+class ReplayStepRule:
+    """How replay matches calls of one step to its recordings, and what a live replay does when none matches."""
+    # Match calls on the step name alone, so a changed input never counts as divergence. For steps whose input
+    # doesn't affect what they return, such as narration whose wording follows the model.
+    match_on_name_only: bool = False
+    # Input property names dropped at any depth before matching (e.g. "reasoning", "request_id").
+    ignore_input_fields: set[str] = field(default_factory=set)
+    # Live replay: what a diverged call does, "stop" or "serve". None uses ReplayOptions.stop_on_divergence_types:
+    # stop when the step was recorded with one of those types, serve otherwise.
+    on_divergence: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        if self.on_divergence not in (None, STOP, SERVE):
+            raise ValueError(f"ReplayStepRule.on_divergence must be 'stop', 'serve' or None, not {self.on_divergence!r}")
+        if isinstance(self.ignore_input_fields, str):
+            raise TypeError(
+                "ReplayStepRule.ignore_input_fields takes a collection of field names, such as {\"reasoning\"}, "
+                f"not the string {self.ignore_input_fields!r}"
+            )
+        self.ignore_input_fields = set(self.ignore_input_fields)
+
+
+@dataclass(frozen=True)
+class ReplayStop:
+    """Where a live replay left its recording and stopped. Past this step nobody knows what the real tools would have
+    returned, so the replay is inconclusive: its assertions are not evaluated and it neither passes nor fails.
+    step is the 1-based position of the call among the replay's steps; recorded_input is None when there was no
+    recording to compare with."""
+    step: int
+    step_name: str
+    reason: str
+    recorded_input: Any
+    actual_input: Any
+    message: str
+
+
+class ReplayStoppedError(Exception):
+    """Raised from a step when a live replay stops there (ReplayStop). Let it propagate: if the agent catches it, the
+    replay is still inconclusive, and every later step raises it again."""
+
+    def __init__(self, stop: ReplayStop):
+        super().__init__(stop.message)
+        self.stop = stop
+
+
 @dataclass(frozen=True)
 class UnusedRecording:
     """A recorded step the replay never called."""
@@ -36,6 +95,16 @@ class ReplayFidelity:
     def __init__(self, recorded: Iterable[UnusedRecording]):
         self._bindings: list[ReplayBinding] = []
         self._unused: list[UnusedRecording] = list(recorded)
+        self._stop: Optional[ReplayStop] = None
+
+    @property
+    def stop(self) -> Optional[ReplayStop]:
+        """Where a live replay left its recording and stopped, or None when it didn't."""
+        return self._stop
+
+    def _stopped(self, stop: ReplayStop) -> None:
+        if self._stop is None:
+            self._stop = stop
 
     @property
     def bindings(self) -> list[ReplayBinding]:

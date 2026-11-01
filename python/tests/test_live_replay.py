@@ -4,11 +4,14 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never reach the real API
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from veval import (  # noqa: E402
-    ReplayOptions, ScenarioItem, StepData, TraceAssert, TraceData, VevalOptions, VevalSdk, VevalTestSdk,
+    ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, StepData, TraceAssert, TraceData, VevalOptions,
+    VevalSdk, VevalTestSdk,
 )
 
 PROMPT = "List overdue items first."
@@ -141,18 +144,24 @@ def test_live_replay_runs_an_extra_call_of_a_model_step_live():
     assert (last.kind, last.recorded_index) == ("live", None)
 
 
-def test_live_replay_refuses_to_run_an_unrecorded_tool_call():
+def test_live_replay_stops_inconclusive_on_an_unrecorded_tool_call():
     charged = []
 
     async def agent(ctx):
         await briefing_agent(PROMPT)(ctx)
         return await ctx.track_step_async("charge_card", 42, returning("ok", lambda: charged.append(1)))
 
-    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(live_model_steps=True)))
-    assert not result.passed
-    assert len(result.failures) == 1
-    assert "Live replay: step 'charge_card' has no recording" in result.failures[0]
+    result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(
+        live_model_steps=True, assertions=[TraceAssert.output_contains("never")],
+    )))
     assert charged == []
+    assert result.outcome == "inconclusive"
+    assert not result.passed
+    assert result.failures == []  # a stopped replay can't back up a verdict, so assertions are not evaluated
+    stop = result.inconclusive
+    assert (stop.step, stop.step_name, stop.reason) == (3, "charge_card", "no_recording")
+    assert "the trace never recorded it" in stop.message
+    assert "replay mocked to test this change" in stop.message
 
 
 def test_live_replay_reports_unused_recordings_without_failing():
@@ -162,3 +171,188 @@ def test_live_replay_reports_unused_recordings_without_failing():
     result = asyncio.run(sdk().replay_async(briefing_trace(), agent, ReplayOptions(live_model_steps=True)))
     assert result.passed  # a live model may legitimately take a different path
     assert [u.step_name for u in result.fidelity.unused] == ["visit_portal"]
+
+
+def browser_trace():
+    """A browser trace: the model fills a field, reads the page, and narrates what it does. Narration's text follows
+    the model's wording and doesn't change the page."""
+    return TraceData(trace_id="tr_browser", agent_name="browser", input="book", status="success", steps=[
+        recorded("plan", "book", "fill date 2026-11-02", "llm"),
+        recorded("narrate", {"text": "Filling the date"}, "ok", "custom"),
+        recorded("fill", {"field": "date", "value": "2026-11-02"}, "filled", "tool"),
+        recorded("page_snapshot", {"reasoning": "check the form", "tab": 1}, "<form date=2026-11-02>", "tool"),
+        recorded("answer", "<form date=2026-11-02>", "Booked for Nov 2.", "llm"),
+    ])
+
+
+def browser_agent(date="2026-11-02", narration="Filling the date", reasoning="check the form", tools_run=None):
+    """The browser agent; each argument is what the live model would now choose at that point."""
+    def ran(name):
+        return (lambda: tools_run.append(name)) if tools_run is not None else None
+
+    async def agent(ctx):
+        await ctx.track_step_async("plan", "book", returning(f"fill date {date}"))
+        await ctx.track_step_async("narrate", {"text": narration}, returning("ok", ran("narrate")))
+        await ctx.track_step_async("fill", {"field": "date", "value": date}, returning("filled", ran("fill")))
+        page = await ctx.track_step_async(
+            "page_snapshot", {"reasoning": reasoning, "tab": 1}, returning("live page", ran("page_snapshot")))
+        return await ctx.track_step_async("answer", page, returning("Booked for Nov 2."))
+    return agent
+
+
+def live_replay(agent, **options):
+    return asyncio.run(sdk().replay_async(browser_trace(), agent, ReplayOptions(
+        live_model_steps=True, assertions=[TraceAssert.output_contains("Booked")], **options,
+    )))
+
+
+def test_live_replay_stops_where_a_diverged_tool_step_leaves_the_recording():
+    tools_run = []
+    result = live_replay(browser_agent(date="2026-11-03", tools_run=tools_run))
+
+    assert result.outcome == "inconclusive"
+    assert result.failures == []
+    stop = result.inconclusive
+    assert (stop.step, stop.step_name, stop.reason) == (3, "fill", "diverged")
+    assert '"value":"2026-11-02"' in stop.message
+    assert '"value":"2026-11-03"' in stop.message
+    assert "re-record, or replay mocked to test this change" in stop.message
+    assert tools_run == []  # no tool runs for real in a live replay, and nothing runs after the stop
+    steps = result.replayed_context.steps
+    assert [s.name for s in steps] == ["plan", "narrate", "fill"]
+    assert steps[-1].status == "error"
+    assert result.status == "error"
+
+
+def test_live_replay_passes_when_only_a_name_matched_narration_step_changes():
+    result = live_replay(
+        browser_agent(narration="Now I will fill in the date field"),
+        stop_on_divergence_types={"tool", "custom"},
+        step_rules={"narrate": ReplayStepRule(match_on_name_only=True)},
+    )
+
+    assert result.outcome == "passed", result.failures
+    assert result.fidelity.diverged == 0
+
+
+def test_live_replay_ignored_input_fields_dont_count_as_divergence():
+    without_rule = live_replay(browser_agent(reasoning="make sure the date stuck"))
+    with_rule = live_replay(
+        browser_agent(reasoning="make sure the date stuck"),
+        step_rules={"page_snapshot": ReplayStepRule(ignore_input_fields={"reasoning"})},
+    )
+
+    assert without_rule.inconclusive.step_name == "page_snapshot"
+    assert with_rule.outcome == "passed", with_rule.failures
+
+
+def test_live_replay_ignores_fields_inside_a_json_string_input():
+    # A model's tool-call arguments often arrive as a JSON string rather than an object.
+    trace = browser_trace()
+    trace.steps[3].input = '{"reasoning":"check the form","tab":1}'
+
+    async def agent(ctx):
+        await ctx.track_step_async("plan", "book", returning("fill"))
+        await ctx.track_step_async("narrate", {"text": "Filling the date"}, returning("ok"))
+        await ctx.track_step_async("fill", {"field": "date", "value": "2026-11-02"}, returning("filled"))
+        page = await ctx.track_step_async(
+            "page_snapshot", '{"tab": 1, "reasoning": "make sure the date stuck"}', returning("live"))
+        return await ctx.track_step_async("answer", page, returning("Booked for Nov 2."))
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(
+        live_model_steps=True, step_rules={"page_snapshot": ReplayStepRule(ignore_input_fields={"reasoning"})},
+    )))
+    assert result.outcome == "passed", result.inconclusive and result.inconclusive.message
+
+
+def test_replay_step_rule_rejects_values_it_would_misread():
+    with pytest.raises(ValueError):
+        ReplayStepRule(on_divergence="Stop")
+    with pytest.raises(TypeError):
+        ReplayStepRule(ignore_input_fields="reasoning")
+
+
+def test_live_replay_serves_a_diverged_untyped_step_by_default_and_reports_it():
+    result = live_replay(browser_agent(narration="Typing the date"))
+
+    assert result.outcome == "passed", result.failures
+    assert [b.step_name for b in result.fidelity.bindings if b.kind == "diverged"] == ["narrate"]
+
+
+def test_live_replay_a_step_rule_overrides_the_type_default():
+    served = live_replay(browser_agent(date="2026-11-03"), step_rules={"fill": ReplayStepRule(on_divergence="serve")})
+    stopped = live_replay(
+        browser_agent(narration="Typing the date"), step_rules={"narrate": ReplayStepRule(on_divergence="stop")})
+
+    assert served.outcome == "passed", served.failures
+    assert served.fidelity.diverged == 1
+    assert stopped.inconclusive.step_name == "narrate"
+
+
+def test_live_replay_stays_inconclusive_when_the_agent_catches_the_stop():
+    later_step_raised = []
+
+    async def agent(ctx):
+        try:
+            await ctx.track_step_async("fill", {"field": "date", "value": "tomorrow"}, returning("filled"))
+        except Exception:
+            pass  # an agent that retries or swallows tool errors
+        try:
+            await ctx.track_step_async("page_snapshot", {"reasoning": "check the form", "tab": 1}, returning("live"))
+        except ReplayStoppedError:
+            later_step_raised.append(True)
+        return "Booked anyway"
+
+    result = live_replay(agent)
+
+    assert later_step_raised == [True]  # every step after the stop raises it again
+    assert result.outcome == "inconclusive"
+    assert result.inconclusive.step_name == "fill"
+    assert result.failures == []
+
+
+def test_live_replay_stops_a_synchronous_step_too():
+    def agent(ctx):
+        ctx.track_step("plan", "book", lambda: "fill date 2026-11-03")
+        ctx.track_step("narrate", {"text": "Filling the date"}, lambda: "ok")
+        ctx.track_step("fill", {"field": "date", "value": "2026-11-03"}, lambda: "filled")
+        return "Booked"
+
+    result = sdk().replay(browser_trace(), agent, ReplayOptions(live_model_steps=True))
+
+    assert result.outcome == "inconclusive"
+    assert result.inconclusive.step_name == "fill"
+
+
+def test_mocked_replay_still_serves_a_diverged_tool_step():
+    result = asyncio.run(sdk().replay_async(
+        browser_trace(), browser_agent(date="2026-11-03"), ReplayOptions(mock_llm_responses=True)))
+
+    assert result.inconclusive is None  # stopping on divergence is for live replays; mocked replay serves every step
+    assert [b.step_name for b in result.fidelity.bindings if b.kind == "diverged"] == ["fill"]
+
+
+def test_scenario_counts_an_inconclusive_item_apart_and_an_item_rule_replaces_the_scenario_rule():
+    trace = browser_trace()
+    veval = sdk()
+
+    async def get_trace(_trace_id):
+        return trace
+    veval.get_trace_async = get_trace
+
+    result = asyncio.run(veval.run_scenario_async(
+        "browser", browser_agent(date="2026-11-03"), [],
+        [
+            ScenarioItem(name="stops", trace_id=trace.trace_id),
+            ScenarioItem(name="served", trace_id=trace.trace_id,
+                         step_rules={"fill": ReplayStepRule(on_divergence="serve")}),
+        ],
+        step_rules={"fill": ReplayStepRule(on_divergence="stop")},
+    ))
+
+    assert not result.passed
+    assert (result.pass_count, result.fail_count, result.inconclusive_count) == (1, 0, 1)
+    assert result.results[0].inconclusive.step_name == "fill"
+    assert not result.results[0].passed
+    assert result.results[1].passed, result.results[1].failures
+

@@ -82,64 +82,17 @@ public class VevalSdk : IVevalSdk
         return diff;
     }
 
-    public async Task<ReplayResult> ReplayAsync<T>(
-        TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
-    {
-        var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input) { IsReplay = true };
-        if (options.LiveModelSteps)
-            ctx.LoadMockOutputs(trace, liveModelSteps: true);
-        else if (options.MockLlmResponses)
-            ctx.LoadMockOutputs(trace);
-
-        var startedAt = DateTime.UtcNow;
-        object? output = null;
-        string status = "success";
-        string? error = null;
-
-        try
-        {
-            output = await callback(ctx);
-        }
-        catch (Exception ex)
-        {
-            status = "error";
-            error = ex.Message;
-        }
-
-        var completedAt = DateTime.UtcNow;
-
-        var failures = new List<string>();
-        if (error != null) failures.Add($"Replay threw exception: {error}");
-        if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
-            failures.Add(bindingFailure);
-        foreach (var assertion in options.Assertions)
-        {
-            var failure = await assertion.EvaluateAsync(ctx);
-            if (failure != null)
-                failures.Add(failure);
-        }
-        var recordingDiff = ReplayRecordingCheck.Evaluate(trace, ctx, options, failures);
-
-        return new ReplayResult
-        {
-            Failures = failures,
-            ReplayedContext = ctx,
-            Output = output,
-            StartedAt = startedAt,
-            CompletedAt = completedAt,
-            Status = status,
-            Error = error,
-            RecordingDiff = recordingDiff,
-            Fidelity = ctx.ReplayFidelity,
-        };
-    }
+    public Task<ReplayResult> ReplayAsync<T>(
+        TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options) =>
+        ReplayRunner.RunAsync(trace, callback, options);
 
     public async Task<ScenarioRunResult> RunScenarioAsync<T>(
         string scenarioName,
         Func<VevalExecutionContext, Task<T>> agent,
         ITraceAssertion[] scenarioAssertions,
         ScenarioItem[]? items = null,
-        bool mockModelSteps = false)
+        bool mockModelSteps = false,
+        IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null)
     {
         // Resolve items: inline takes precedence, otherwise fetch from API
         var resolvedItems = items ?? (await _client.GetScenarioItemsAsync(scenarioName))
@@ -163,8 +116,9 @@ public class VevalSdk : IVevalSdk
                 }
                 else
                 {
-                    var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, mockModelSteps, effectiveAssertions));
+                    var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, mockModelSteps, effectiveAssertions, stepRules));
                     itemResult.Failures.AddRange(replayResult.Failures);
+                    itemResult.Inconclusive = replayResult.Inconclusive;
                     itemResult.Context = replayResult.ReplayedContext;
 
                     // Record the replay as a trace so it appears in the dashboard
@@ -210,10 +164,29 @@ public class VevalSdk : IVevalSdk
     /// How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
     /// the whole scenario opts into mocked replay.
     /// </summary>
-    internal static ReplayOptions ScenarioReplayOptions(ScenarioItem item, bool mockModelSteps, ITraceAssertion[] assertions)
+    internal static ReplayOptions ScenarioReplayOptions(
+        ScenarioItem item, bool mockModelSteps, ITraceAssertion[] assertions,
+        IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null)
     {
         var mocked = mockModelSteps || item.MockModelSteps;
-        return new ReplayOptions { MockLlmResponses = mocked, LiveModelSteps = !mocked, Assertions = assertions };
+        return new ReplayOptions
+        {
+            MockLlmResponses = mocked,
+            LiveModelSteps = !mocked,
+            Assertions = assertions,
+            StepRules = MergeStepRules(stepRules, item.StepRules),
+        };
+    }
+
+    /// <summary>The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step.</summary>
+    internal static Dictionary<string, ReplayStepRule> MergeStepRules(
+        IReadOnlyDictionary<string, ReplayStepRule>? scenarioRules, IReadOnlyDictionary<string, ReplayStepRule> itemRules)
+    {
+        var merged = new Dictionary<string, ReplayStepRule>();
+        if (scenarioRules != null)
+            foreach (var kv in scenarioRules) merged[kv.Key] = kv.Value;
+        foreach (var kv in itemRules) merged[kv.Key] = kv.Value;
+        return merged;
     }
 
     /// <summary>Runs one synthetic scenario item, sends its trace through the report, and returns its context.</summary>

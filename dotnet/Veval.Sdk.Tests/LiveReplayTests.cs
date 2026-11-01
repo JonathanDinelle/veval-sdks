@@ -152,7 +152,7 @@ public class LiveReplayTests
     }
 
     [Fact]
-    public async Task LiveReplay_RefusesToRunAnUnrecordedToolCall()
+    public async Task LiveReplay_StopsInconclusiveOnAnUnrecordedToolCall()
     {
         var sdk = new VevalSdk(new VevalOptions { ApiKey = "test" });
         var charged = false;
@@ -161,11 +161,15 @@ public class LiveReplayTests
         {
             await BriefingAgent(Prompt)(ctx);
             return await ctx.TrackStepAsync("charge_card", 42, () => { charged = true; return Task.FromResult("ok"); });
-        }, new ReplayOptions { LiveModelSteps = true });
+        }, new ReplayOptions { LiveModelSteps = true, Assertions = [TraceAssert.OutputContains("never")] });
 
-        result.Passed.Should().BeFalse();
-        result.Failures.Should().ContainSingle(f => f.Contains("Live replay: step 'charge_card' has no recording"));
         charged.Should().BeFalse();
+        result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
+        result.Passed.Should().BeFalse();
+        result.Failures.Should().BeEmpty("a stopped replay can't back up a verdict, so assertions are not evaluated");
+        result.Inconclusive!.Should().Match<ReplayStop>(s =>
+            s.Step == 3 && s.StepName == "charge_card" && s.Reason == ReplayStopReason.NoRecording);
+        result.Inconclusive!.Message.Should().Contain("the trace never recorded it").And.Contain("replay mocked to test this change");
     }
 
     [Fact]
@@ -179,5 +183,210 @@ public class LiveReplayTests
 
         result.Passed.Should().BeTrue("a live model may legitimately take a different path");
         result.Fidelity!.Unused.Should().ContainSingle(u => u.StepName == "visit_portal");
+    }
+
+    /// <summary>
+    /// A browser trace: the model fills a field, reads the page, and narrates what it does. Narration's text follows
+    /// the model's wording and doesn't change the page.
+    /// </summary>
+    private static TraceData BrowserTrace() => new()
+    {
+        TraceId = "tr_browser",
+        AgentName = "browser",
+        Input = "book",
+        Status = "success",
+        Steps =
+        [
+            Recorded("s1", "plan", "llm", "book", "fill date 2026-11-02"),
+            Recorded("s2", "narrate", "custom", new { text = "Filling the date" }, "ok"),
+            Recorded("s3", "fill", "tool", new { field = "date", value = "2026-11-02" }, "filled"),
+            Recorded("s4", "page_snapshot", "tool", new { reasoning = "check the form", tab = 1 }, "<form date=2026-11-02>"),
+            Recorded("s5", "answer", "llm", "<form date=2026-11-02>", "Booked for Nov 2."),
+        ],
+    };
+
+    /// <summary>The browser agent; each argument is what the live model would now choose at that point.</summary>
+    private static Func<VevalExecutionContext, Task<string>> BrowserAgent(
+        string date = "2026-11-02", string narration = "Filling the date", string reasoning = "check the form",
+        List<string>? toolsRun = null) => async ctx =>
+    {
+        await ctx.TrackStepAsync("plan", "book", () => Task.FromResult($"fill date {date}"));
+        await ctx.TrackStepAsync("narrate", new { text = narration }, () => { toolsRun?.Add("narrate"); return Task.FromResult("ok"); });
+        await ctx.TrackStepAsync("fill", new { field = "date", value = date }, () => { toolsRun?.Add("fill"); return Task.FromResult("filled"); });
+        var page = await ctx.TrackStepAsync("page_snapshot", new { reasoning, tab = 1 }, () => { toolsRun?.Add("page_snapshot"); return Task.FromResult("live page"); });
+        return await ctx.TrackStepAsync("answer", page, () => Task.FromResult("Booked for Nov 2."));
+    };
+
+    private static Task<ReplayResult> LiveReplay(Func<VevalExecutionContext, Task<string>> agent, ReplayOptions? options = null)
+    {
+        options ??= new ReplayOptions();
+        options.LiveModelSteps = true;
+        options.Assertions = [TraceAssert.OutputContains("Booked")];
+        return new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BrowserTrace(), agent, options);
+    }
+
+    [Fact]
+    public async Task LiveReplay_StopsWhereADivergedToolStepLeavesTheRecording()
+    {
+        var toolsRun = new List<string>();
+        var result = await LiveReplay(BrowserAgent(date: "2026-11-03", toolsRun: toolsRun));
+
+        result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
+        result.Failures.Should().BeEmpty();
+        var stop = result.Inconclusive!;
+        stop.Step.Should().Be(3);
+        stop.StepName.Should().Be("fill");
+        stop.Reason.Should().Be(ReplayStopReason.Diverged);
+        stop.Message.Should().Contain("\"value\":\"2026-11-02\"").And.Contain("\"value\":\"2026-11-03\"")
+            .And.Contain("re-record, or replay mocked to test this change");
+        toolsRun.Should().BeEmpty("no tool runs for real in a live replay, and nothing runs after the stop");
+        result.ReplayedContext!.Steps.Select(s => s.Name).Should().Equal("plan", "narrate", "fill");
+        result.ReplayedContext.Steps.Last().Status.Should().Be("error");
+        result.Status.Should().Be("error");
+    }
+
+    [Fact]
+    public async Task LiveReplay_PassesWhenOnlyANameMatchedNarrationStepChanges()
+    {
+        var result = await LiveReplay(BrowserAgent(narration: "Now I will fill in the date field"), new ReplayOptions
+        {
+            StopOnDivergenceTypes = new HashSet<string> { "tool", "custom" },
+            StepRules = { ["narrate"] = new ReplayStepRule { MatchOnNameOnly = true } },
+        });
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", result.Failures));
+        result.Fidelity!.Diverged.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task LiveReplay_IgnoredInputFieldsDontCountAsDivergence()
+    {
+        var withoutRule = await LiveReplay(BrowserAgent(reasoning: "make sure the date stuck"));
+        var withRule = await LiveReplay(BrowserAgent(reasoning: "make sure the date stuck"), new ReplayOptions
+        {
+            StepRules = { ["page_snapshot"] = new ReplayStepRule { IgnoreInputFields = new HashSet<string> { "reasoning" } } },
+        });
+
+        withoutRule.Inconclusive!.StepName.Should().Be("page_snapshot");
+        withRule.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", withRule.Failures));
+    }
+
+    [Fact]
+    public async Task LiveReplay_ServesADivergedUntypedStepByDefault_AndReportsIt()
+    {
+        var result = await LiveReplay(BrowserAgent(narration: "Typing the date"));
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", result.Failures));
+        result.Fidelity!.Bindings.Should().ContainSingle(b => b.Kind == ReplayBindingKind.Diverged && b.StepName == "narrate");
+    }
+
+    [Fact]
+    public async Task LiveReplay_AStepRuleOverridesTheTypeDefault()
+    {
+        var served = await LiveReplay(BrowserAgent(date: "2026-11-03"), new ReplayOptions
+        {
+            StepRules = { ["fill"] = new ReplayStepRule { OnDivergence = OnDivergence.Serve } },
+        });
+        var stopped = await LiveReplay(BrowserAgent(narration: "Typing the date"), new ReplayOptions
+        {
+            StepRules = { ["narrate"] = new ReplayStepRule { OnDivergence = OnDivergence.Stop } },
+        });
+
+        served.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", served.Failures));
+        served.Fidelity!.Diverged.Should().Be(1);
+        stopped.Inconclusive!.StepName.Should().Be("narrate");
+    }
+
+    [Fact]
+    public async Task LiveReplay_StaysInconclusiveWhenTheAgentCatchesTheStop()
+    {
+        var laterStepThrew = false;
+        var result = await LiveReplay(async ctx =>
+        {
+            try { await ctx.TrackStepAsync("fill", new { field = "date", value = "tomorrow" }, () => Task.FromResult("filled")); }
+            catch (Exception) { /* an agent that retries or swallows tool errors */ }
+            try { await ctx.TrackStepAsync("page_snapshot", new { reasoning = "check the form", tab = 1 }, () => Task.FromResult("live")); }
+            catch (ReplayStoppedException) { laterStepThrew = true; }
+            return "Booked anyway";
+        });
+
+        laterStepThrew.Should().BeTrue("every step after the stop throws it again");
+        result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
+        result.Inconclusive!.StepName.Should().Be("fill");
+        result.Failures.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task MockedReplay_StillServesADivergedToolStep()
+    {
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(
+            BrowserTrace(), BrowserAgent(date: "2026-11-03"), new ReplayOptions { MockLlmResponses = true });
+
+        result.Inconclusive.Should().BeNull("stopping on divergence is for live replays; mocked replay serves every step");
+        result.Fidelity!.Bindings.Should().ContainSingle(b => b.Kind == ReplayBindingKind.Diverged && b.StepName == "fill");
+    }
+
+    [Fact]
+    public void ScenarioReplayOptions_AnItemRuleReplacesTheScenarioRuleOfTheSameStep()
+    {
+        var item = new ScenarioItem
+        {
+            TraceId = "tr_browser",
+            StepRules = { ["fill"] = new ReplayStepRule { OnDivergence = OnDivergence.Serve } },
+        };
+        var scenarioRules = new Dictionary<string, ReplayStepRule>
+        {
+            ["fill"] = new() { OnDivergence = OnDivergence.Stop },
+            ["narrate"] = new() { MatchOnNameOnly = true },
+        };
+
+        var options = VevalSdk.ScenarioReplayOptions(item, false, [], scenarioRules);
+
+        options.StepRules["fill"].OnDivergence.Should().Be(OnDivergence.Serve);
+        options.StepRules["narrate"].MatchOnNameOnly.Should().BeTrue();
+    }
+
+    [Fact]
+    public void ScenarioRunResult_CountsInconclusiveItemsApart()
+    {
+        var stop = new ReplayStop(3, "fill", ReplayStopReason.Diverged, null, null, "stopped");
+        var result = new ScenarioRunResult
+        {
+            Results =
+            [
+                new ItemRunResult { Item = new ScenarioItem() },
+                new ItemRunResult { Item = new ScenarioItem(), Failures = ["OutputContains failed"] },
+                new ItemRunResult { Item = new ScenarioItem(), Inconclusive = stop },
+            ],
+        };
+
+        result.Passed.Should().BeFalse();
+        (result.PassCount, result.FailCount, result.InconclusiveCount).Should().Be((1, 1, 1));
+        result.Results[2].Passed.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task LiveReplay_IgnoresFieldsInsideAJsonStringInput()
+    {
+        // A model's tool-call arguments often arrive as a JSON string rather than an object.
+        var trace = BrowserTrace();
+        trace.Steps[3].Input = "{\"reasoning\":\"check the form\",\"tab\":1}";
+        Func<VevalExecutionContext, Task<string>> agent = async ctx =>
+        {
+            await ctx.TrackStepAsync("plan", "book", () => Task.FromResult("fill"));
+            await ctx.TrackStepAsync("narrate", new { text = "Filling the date" }, () => Task.FromResult("ok"));
+            await ctx.TrackStepAsync("fill", new { field = "date", value = "2026-11-02" }, () => Task.FromResult("filled"));
+            var page = await ctx.TrackStepAsync("page_snapshot", "{\"tab\": 1, \"reasoning\": \"make sure the date stuck\"}",
+                () => Task.FromResult("live"));
+            return await ctx.TrackStepAsync("answer", page, () => Task.FromResult("Booked for Nov 2."));
+        };
+
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(trace, agent, new ReplayOptions
+        {
+            LiveModelSteps = true,
+            StepRules = { ["page_snapshot"] = new ReplayStepRule { IgnoreInputFields = new HashSet<string> { "reasoning" } } },
+        });
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, result.Inconclusive?.Message);
     }
 }

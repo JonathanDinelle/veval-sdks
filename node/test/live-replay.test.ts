@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { ReplayOptions, ReplayStoppedError, TraceAssert, TraceData, VevalExecutionContext } from "../src";
 import { recorded, sdk, testSdk } from "./helpers";
 
 // Live replay: model steps run for real, every other step is served from the recording.
@@ -112,17 +112,21 @@ test("live replay runs an extra call of a model step live", async () => {
   assert.deepEqual([last.kind, last.recorded_index], ["live", null]);
 });
 
-test("live replay refuses to run an unrecorded tool call", async () => {
+test("live replay stops inconclusive on an unrecorded tool call", async () => {
   let charged = false;
   const result = await sdk().replayAsync(briefingTrace(), async (ctx) => {
     await briefingAgent(PROMPT)(ctx);
     return ctx.trackStepAsync("charge_card", 42, async () => { charged = true; return "ok"; });
-  }, { live_model_steps: true, assertions: [] });
+  }, { live_model_steps: true, assertions: [TraceAssert.outputContains("never")] });
 
-  assert.equal(result.passed, false);
-  assert.equal(result.failures.length, 1);
-  assert.match(result.failures[0], /Live replay: step 'charge_card' has no recording/);
   assert.equal(charged, false);
+  assert.equal(result.outcome, "inconclusive");
+  assert.equal(result.passed, false);
+  assert.deepEqual(result.failures, [], "a stopped replay can't back up a verdict, so assertions are not evaluated");
+  const stop = result.inconclusive!;
+  assert.deepEqual([stop.step, stop.step_name, stop.reason], [3, "charge_card", "no_recording"]);
+  assert.match(stop.message, /the trace never recorded it/);
+  assert.match(stop.message, /replay mocked to test this change/);
 });
 
 test("live replay reports unused recordings without failing", async () => {
@@ -132,4 +136,150 @@ test("live replay reports unused recordings without failing", async () => {
 
   assert.equal(result.passed, true, "a live model may legitimately take a different path");
   assert.deepEqual(result.fidelity!.unused.map((u) => u.step_name), ["visit_portal"]);
+});
+
+/**
+ * A browser trace: the model fills a field, reads the page, and narrates what it does. Narration's text follows
+ * the model's wording and doesn't change the page.
+ */
+const browserTrace = (): TraceData => ({
+  trace_id: "tr_browser", agent_name: "browser", input: "book", output: null, status: "success", error: null,
+  started_at: new Date().toISOString(), completed_at: null, duration_ms: null, total_cost_usd: null, metadata: {},
+  steps: [
+    recorded("plan", "book", "fill date 2026-11-02", "llm"),
+    recorded("narrate", { text: "Filling the date" }, "ok", "custom"),
+    recorded("fill", { field: "date", value: "2026-11-02" }, "filled", "tool"),
+    recorded("page_snapshot", { reasoning: "check the form", tab: 1 }, "<form date=2026-11-02>", "tool"),
+    recorded("answer", "<form date=2026-11-02>", "Booked for Nov 2.", "llm"),
+  ],
+});
+
+/** The browser agent; each option is what the live model would now choose at that point. */
+const browserAgent = (opts: { date?: string; narration?: string; reasoning?: string; toolsRun?: string[] } = {}) =>
+  async (ctx: VevalExecutionContext) => {
+    const { date = "2026-11-02", narration = "Filling the date", reasoning = "check the form", toolsRun } = opts;
+    await ctx.trackStepAsync("plan", "book", async () => `fill date ${date}`);
+    await ctx.trackStepAsync("narrate", { text: narration }, async () => { toolsRun?.push("narrate"); return "ok"; });
+    await ctx.trackStepAsync("fill", { field: "date", value: date }, async () => { toolsRun?.push("fill"); return "filled"; });
+    const page = await ctx.trackStepAsync("page_snapshot", { reasoning, tab: 1 }, async () => { toolsRun?.push("page_snapshot"); return "live page"; });
+    return ctx.trackStepAsync("answer", page, async () => "Booked for Nov 2.");
+  };
+
+const liveReplay = (agent: (ctx: VevalExecutionContext) => Promise<unknown>, options: Partial<ReplayOptions> = {}) =>
+  sdk().replayAsync(browserTrace(), agent, {
+    ...options, live_model_steps: true, assertions: [TraceAssert.outputContains("Booked")],
+  });
+
+test("live replay stops where a diverged tool step leaves the recording", async () => {
+  const toolsRun: string[] = [];
+  const result = await liveReplay(browserAgent({ date: "2026-11-03", toolsRun }));
+
+  assert.equal(result.outcome, "inconclusive");
+  assert.deepEqual(result.failures, []);
+  const stop = result.inconclusive!;
+  assert.deepEqual([stop.step, stop.step_name, stop.reason], [3, "fill", "diverged"]);
+  assert.ok(stop.message.includes('"value":"2026-11-02"'), stop.message);
+  assert.ok(stop.message.includes('"value":"2026-11-03"'), stop.message);
+  assert.match(stop.message, /re-record, or replay mocked to test this change/);
+  assert.deepEqual(toolsRun, [], "no tool runs for real in a live replay, and nothing runs after the stop");
+  const steps = result.replayed_context!.steps;
+  assert.deepEqual(steps.map((s) => s.name), ["plan", "narrate", "fill"]);
+  assert.equal(steps.at(-1)!.status, "error");
+  assert.equal(result.status, "error");
+});
+
+test("live replay passes when only a name-matched narration step changes", async () => {
+  const result = await liveReplay(browserAgent({ narration: "Now I will fill in the date field" }), {
+    stop_on_divergence_types: ["tool", "custom"],
+    step_rules: { narrate: { match_on_name_only: true } },
+  });
+
+  assert.equal(result.outcome, "passed", result.failures.join("; "));
+  assert.equal(result.fidelity!.diverged, 0);
+});
+
+test("live replay: ignored input fields don't count as divergence", async () => {
+  const withoutRule = await liveReplay(browserAgent({ reasoning: "make sure the date stuck" }));
+  const withRule = await liveReplay(browserAgent({ reasoning: "make sure the date stuck" }), {
+    step_rules: { page_snapshot: { ignore_input_fields: ["reasoning"] } },
+  });
+
+  assert.equal(withoutRule.inconclusive!.step_name, "page_snapshot");
+  assert.equal(withRule.outcome, "passed", withRule.failures.join("; "));
+});
+
+test("live replay ignores fields inside a JSON string input", async () => {
+  // A model's tool-call arguments often arrive as a JSON string rather than an object.
+  const trace = browserTrace();
+  trace.steps[3].input = '{"reasoning":"check the form","tab":1}';
+  const result = await sdk().replayAsync(trace, async (ctx) => {
+    await ctx.trackStepAsync("plan", "book", async () => "fill");
+    await ctx.trackStepAsync("narrate", { text: "Filling the date" }, async () => "ok");
+    await ctx.trackStepAsync("fill", { field: "date", value: "2026-11-02" }, async () => "filled");
+    const page = await ctx.trackStepAsync("page_snapshot", '{"tab": 1, "reasoning": "make sure the date stuck"}', async () => "live");
+    return ctx.trackStepAsync("answer", page, async () => "Booked for Nov 2.");
+  }, { live_model_steps: true, assertions: [], step_rules: { page_snapshot: { ignore_input_fields: ["reasoning"] } } });
+
+  assert.equal(result.outcome, "passed", result.inconclusive?.message);
+});
+
+test("live replay serves a diverged untyped step by default and reports it", async () => {
+  const result = await liveReplay(browserAgent({ narration: "Typing the date" }));
+
+  assert.equal(result.outcome, "passed", result.failures.join("; "));
+  const diverged = result.fidelity!.bindings.filter((b) => b.kind === "diverged");
+  assert.deepEqual(diverged.map((b) => b.step_name), ["narrate"]);
+});
+
+test("live replay: a step rule overrides the type default", async () => {
+  const served = await liveReplay(browserAgent({ date: "2026-11-03" }), { step_rules: { fill: { on_divergence: "serve" } } });
+  const stopped = await liveReplay(browserAgent({ narration: "Typing the date" }), { step_rules: { narrate: { on_divergence: "stop" } } });
+
+  assert.equal(served.outcome, "passed", served.failures.join("; "));
+  assert.equal(served.fidelity!.diverged, 1);
+  assert.equal(stopped.inconclusive!.step_name, "narrate");
+});
+
+test("live replay stays inconclusive when the agent catches the stop", async () => {
+  let laterStepThrew = false;
+  const result = await liveReplay(async (ctx) => {
+    try { await ctx.trackStepAsync("fill", { field: "date", value: "tomorrow" }, async () => "filled"); }
+    catch { /* an agent that retries or swallows tool errors */ }
+    try { await ctx.trackStepAsync("page_snapshot", { reasoning: "check the form", tab: 1 }, async () => "live"); }
+    catch (err) { laterStepThrew = err instanceof ReplayStoppedError; }
+    return "Booked anyway";
+  });
+
+  assert.equal(laterStepThrew, true, "every step after the stop throws it again");
+  assert.equal(result.outcome, "inconclusive");
+  assert.equal(result.inconclusive!.step_name, "fill");
+  assert.deepEqual(result.failures, []);
+});
+
+test("mocked replay still serves a diverged tool step", async () => {
+  const result = await sdk().replayAsync(browserTrace(), browserAgent({ date: "2026-11-03" }),
+    { mock_llm_responses: true, assertions: [] });
+
+  assert.equal(result.inconclusive, null, "stopping on divergence is for live replays; mocked replay serves every step");
+  const diverged = result.fidelity!.bindings.filter((b) => b.kind === "diverged");
+  assert.deepEqual(diverged.map((b) => b.step_name), ["fill"]);
+});
+
+test("scenario: an inconclusive item is counted apart, and an item rule replaces the scenario rule", async () => {
+  const trace = browserTrace();
+  const veval = sdk();
+  veval.getTraceAsync = async () => trace;
+
+  const result = await veval.runScenarioAsync("browser", browserAgent({ date: "2026-11-03" }), [],
+    [
+      { name: "stops", trace_id: trace.trace_id, assertions: [] },
+      { name: "served", trace_id: trace.trace_id, assertions: [], step_rules: { fill: { on_divergence: "serve" } } },
+    ],
+    { step_rules: { fill: { on_divergence: "stop" } } });
+
+  assert.equal(result.passed, false);
+  assert.deepEqual([result.pass_count, result.fail_count, result.inconclusive_count], [1, 0, 1]);
+  assert.equal(result.results[0].inconclusive!.step_name, "fill");
+  assert.equal(result.results[0].passed, false);
+  assert.equal(result.results[1].passed, true, result.results[1].failures.join("; "));
 });

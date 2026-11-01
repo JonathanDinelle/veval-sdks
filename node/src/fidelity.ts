@@ -16,6 +16,65 @@ export interface ReplayBinding {
   actual_input: unknown;
 }
 
+/** What a live replay does with a call whose input matches no unused recording of its step. */
+export type OnDivergence =
+  /** Stop the run at that step. The replay ends inconclusive: neither passed nor failed. */
+  | "stop"
+  /** Serve the next unused recording of that step and report the call as diverged in the fidelity report. */
+  | "serve";
+
+/** How replay matches calls of one step to its recordings, and what a live replay does when none matches. */
+export interface ReplayStepRule {
+  /**
+   * Match calls on the step name alone, so a changed input never counts as divergence. For steps whose input
+   * doesn't affect what they return, such as narration whose wording follows the model.
+   */
+  match_on_name_only?: boolean;
+  /** Input property names dropped at any depth before matching (e.g. "reasoning", "request_id"). */
+  ignore_input_fields?: string[];
+  /**
+   * Live replay: what a diverged call does. Unset uses `ReplayOptions.stop_on_divergence_types`: stop when the step
+   * was recorded with one of those types, serve otherwise.
+   */
+  on_divergence?: OnDivergence;
+}
+
+/** Why a live replay stopped. */
+export type ReplayStopReason =
+  /** The call's input matched no unused recording of its step, and the step stops on divergence. */
+  | "diverged"
+  /** The recording has no unused call of that step to serve, and it isn't a model step that can run live. */
+  | "no_recording";
+
+/**
+ * Where a live replay left its recording and stopped. Past this step nobody knows what the real tools would have
+ * returned, so the replay is inconclusive: its assertions are not evaluated and it neither passes nor fails.
+ */
+export interface ReplayStop {
+  /** The 1-based position of the call among the replay's steps. */
+  step: number;
+  step_name: string;
+  reason: ReplayStopReason;
+  /** The input of the recording the call was compared with; null when there was none. */
+  recorded_input: unknown;
+  actual_input: unknown;
+  message: string;
+}
+
+/**
+ * Thrown from a step when a live replay stops there (`ReplayStop`). Let it propagate: if the agent catches it, the
+ * replay is still inconclusive, and every later step throws it again.
+ */
+export class ReplayStoppedError extends Error {
+  readonly stop: ReplayStop;
+
+  constructor(stop: ReplayStop) {
+    super(stop.message);
+    this.name = "ReplayStoppedError";
+    this.stop = stop;
+  }
+}
+
 /** A recorded step the replay never called. */
 export interface UnusedRecording {
   step_name: string;
@@ -29,6 +88,7 @@ export interface UnusedRecording {
 export class ReplayFidelity {
   private readonly _bindings: ReplayBinding[] = [];
   private _unused: UnusedRecording[];
+  private _stop: ReplayStop | null = null;
 
   /** @internal */
   constructor(recorded: UnusedRecording[]) {
@@ -61,6 +121,16 @@ export class ReplayFidelity {
   /** No call diverged and every recorded step was called. Live calls don't count against it. */
   get is_faithful(): boolean {
     return this.diverged === 0 && this._unused.length === 0;
+  }
+
+  /** Where a live replay left its recording and stopped, or null when it didn't. */
+  get stop(): ReplayStop | null {
+    return this._stop;
+  }
+
+  /** @internal */
+  stopped(stop: ReplayStop): void {
+    this._stop ??= stop;
   }
 
   /** @internal */

@@ -1,6 +1,6 @@
 import { Step, StepHandle } from "./step";
 import { StepData, TraceData } from "./tracing";
-import { ReplayFidelity } from "./fidelity";
+import { ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStopReason, ReplayStoppedError } from "./fidelity";
 import { canonicalize } from "./snapshots";
 
 export interface JudgeRecord {
@@ -15,6 +15,8 @@ interface RecordedStep {
   index: number;
   canonicalInput: string;
   consumed: boolean;
+  /** Matching keys with some fields dropped, by sorted field list; computed once per field set. */
+  keysIgnoring: Map<string, string>;
 }
 
 const NO_IGNORED_FIELDS = new Set<string>();
@@ -23,14 +25,54 @@ const NO_IGNORED_FIELDS = new Set<string>();
  * Canonical text for matching a call to a recording. The live input is compared in the form it is sent in
  * (JSON.stringify), so a Date or an object with toJSON matches what the trace recorded for it.
  */
-function inputKey(value: unknown): string {
+function inputKey(value: unknown, ignoreFields: Set<string> = NO_IGNORED_FIELDS): string {
   let sent = value;
   try {
     sent = value === undefined ? null : JSON.parse(JSON.stringify(value));
   } catch {
     // not JSON-serializable (e.g. a cycle): compare as-is
   }
-  return canonicalize(sent, NO_IGNORED_FIELDS);
+  return canonicalize(sent, ignoreFields);
+}
+
+/**
+ * The matching key of an input with some fields dropped. An input that is a JSON object or array encoded as a string,
+ * such as a model's tool-call arguments, is parsed first, so its fields can be dropped too.
+ */
+function ignoringKey(value: unknown, ignoreFields: Set<string>): string {
+  if (typeof value === "string" && /^\s*[[{]/.test(value)) {
+    try {
+      return inputKey(JSON.parse(value), ignoreFields);
+    } catch {
+      // not JSON after all: compare the text
+    }
+  }
+  return inputKey(value, ignoreFields);
+}
+
+function keyIgnoring(recorded: RecordedStep, ignore: string[]): string {
+  const cacheKey = ignore.join("\u0001");
+  let key = recorded.keysIgnoring.get(cacheKey);
+  if (key === undefined) {
+    key = ignoringKey(recorded.data.input, new Set(ignore));
+    recorded.keysIgnoring.set(cacheKey, key);
+  }
+  return key;
+}
+
+/** An input as compact JSON for a message, as the C# and Python SDKs print it. */
+function oneLine(value: unknown): string {
+  try {
+    return JSON.stringify(value === undefined ? null : value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** Options for a replay's step binding: matching rules, and which diverged steps stop a live replay. @internal */
+export interface StepBindingOptions {
+  step_rules?: Record<string, ReplayStepRule>;
+  stop_on_divergence_types?: string[];
 }
 
 export class VevalExecutionContext {
@@ -43,6 +85,8 @@ export class VevalExecutionContext {
   private _fidelity: ReplayFidelity | null = null;
   private _strictMockMode = false;
   private _liveModelSteps = false;
+  private _stepRules: Record<string, ReplayStepRule> = {};
+  private _stopOnDivergenceTypes = new Set<string>();
   private _isReplay = false;
 
   constructor(traceId: string, input: unknown) {
@@ -90,21 +134,29 @@ export class VevalExecutionContext {
     fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>)
   ): Promise<T> {
     if (this._recorded !== null) {
-      const { recorded, exact } = this.findRecording(name, input);
+      // Once a live replay has stopped, nothing after it can be served truthfully, even if the agent caught the stop.
+      const stopped = this._fidelity!.stop;
+      if (stopped) throw new ReplayStoppedError(stopped);
+
+      const rule = Object.prototype.hasOwnProperty.call(this._stepRules, name) ? this._stepRules[name] : undefined;
+      const { recorded, exact } = this.findRecording(name, input, rule);
+      const recordedType = recorded?.data.type ?? this.recordedTypeOf(name);
       // In live mode a model step runs for real, including extra calls of a step recorded as a model step.
-      const runLive = this._liveModelSteps && (recorded?.data.type ?? this.recordedTypeOf(name)) === "llm";
+      const runLive = this._liveModelSteps && recordedType === "llm";
 
       if (recorded === null && !runLive && this._strictMockMode) {
+        if (this._liveModelSteps) throw this.stopAt(name, "no_recording", null, input, recordedType);
         const available = [...new Set(this._recorded.filter((r) => !r.consumed).map((r) => r.data.name))].join(", ");
         throw new Error(
-          this._liveModelSteps
-            ? `Live replay: step '${name}' has no recording to serve, and only steps recorded as 'llm' run live. ` +
-              `Available steps: ${available}. Running it could have reached a real system.`
-            : `Replay mode: no mock output for step '${name}'. ` +
-              `Available steps: ${available}. ` +
-              "This would have made a real LLM call."
+          `Replay mode: no mock output for step '${name}'. ` +
+          `Available steps: ${available}. ` +
+          "This would have made a real LLM call."
         );
       }
+
+      // A live model handed a recording from another path would reason over a page it never reached.
+      if (this._liveModelSteps && !runLive && recorded !== null && !exact && this.stopsOnDivergence(rule, recorded.data.type))
+        throw this.stopAt(name, "diverged", recorded.data.input, input, recordedType);
       if (recorded !== null) recorded.consumed = true;
 
       if (runLive) {
@@ -148,8 +200,11 @@ export class VevalExecutionContext {
     }
   }
 
-  /** `liveModelSteps`: run steps recorded as `llm` for real and serve every other step from the recording. */
-  loadMockOutputs(trace: TraceData, strict = true, liveModelSteps = false): void {
+  /**
+   * `liveModelSteps`: run steps recorded as `llm` for real and serve every other step from the recording.
+   * `options`: step matching rules, and which diverged steps stop a live replay.
+   */
+  loadMockOutputs(trace: TraceData, strict = true, liveModelSteps = false, options?: StepBindingOptions): void {
     if (!trace.steps || trace.steps.length === 0) {
       throw new Error(
         `Replay trace '${trace.trace_id}' has no steps. Cannot mock LLM calls. ` +
@@ -159,26 +214,81 @@ export class VevalExecutionContext {
     this._isReplay = true;
     this._strictMockMode = strict;
     this._liveModelSteps = liveModelSteps;
+    this._stepRules = options?.step_rules ?? {};
+    this._stopOnDivergenceTypes = new Set(options?.stop_on_divergence_types ?? ["tool"]);
     this._recorded = trace.steps.map((data, index) => ({
       data,
       index,
       canonicalInput: inputKey(data.input),
       consumed: false,
+      keysIgnoring: new Map<string, string>(),
     }));
     this._fidelity = new ReplayFidelity(this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })));
   }
 
   /**
    * Picks the recorded step for a call: among unused recordings with the same name, the one whose input is
-   * identical (key order ignored), otherwise the earliest — which is reported as diverged.
+   * identical (key order and the rule's ignored fields aside), otherwise the earliest — which is reported as
+   * diverged. A name-only rule matches the earliest.
    */
-  private findRecording(name: string, input: unknown): { recorded: RecordedStep | null; exact: boolean } {
+  private findRecording(
+    name: string, input: unknown, rule: ReplayStepRule | undefined
+  ): { recorded: RecordedStep | null; exact: boolean } {
     const candidates = this._recorded!.filter((r) => !r.consumed && r.data.name === name);
     if (candidates.length === 0) return { recorded: null, exact: false };
+    if (rule?.match_on_name_only) return { recorded: candidates[0], exact: true };
 
-    const actual = inputKey(input);
-    const match = candidates.find((r) => r.canonicalInput === actual);
+    const ignore = [...new Set(rule?.ignore_input_fields ?? [])].sort();
+    const actual = ignore.length === 0 ? inputKey(input) : ignoringKey(input, new Set(ignore));
+    const match = candidates.find((r) => (ignore.length === 0 ? r.canonicalInput : keyIgnoring(r, ignore)) === actual);
     return { recorded: match ?? candidates[0], exact: match !== undefined };
+  }
+
+  /** Whether a diverged call of this step stops a live replay: the step's rule decides, else its recorded type. */
+  private stopsOnDivergence(rule: ReplayStepRule | undefined, recordedType: string | null | undefined): boolean {
+    if (rule?.on_divergence) return rule.on_divergence === "stop";
+    return !!recordedType && this._stopOnDivergenceTypes.has(recordedType);
+  }
+
+  /** Stops a live replay at this call: records the stop and a failed step for it, and returns the error that ends the run. */
+  private stopAt(
+    name: string, reason: ReplayStopReason, recordedInput: unknown, input: unknown, recordedType: string | null | undefined
+  ): ReplayStoppedError {
+    const position = this._steps.length + 1;
+    const detail =
+      reason === "diverged"
+        ? `its input matches no unused recording of '${name}', so what the real step would return is unknown. ` +
+          `Recorded input: ${oneLine(recordedInput)}. Actual input: ${oneLine(input)}.`
+        : `the recording has no unused call of '${name}' to serve (${this.recordedCallsOf(name)}).`;
+    const advice =
+      reason === "diverged"
+        ? " If the model took a different path, record that path. If your code changed how the step is called, " +
+          "re-record, or replay mocked to test this change. If this input doesn't affect the step's output, " +
+          "match it on name only (step_rules)."
+        : " If the model took a different path, record that path. If your code added this call, re-record, or " +
+          "replay mocked to test this change.";
+    const message =
+      `Live replay stopped at step ${position} ('${name}'): ${detail} ` +
+      "The replay is inconclusive: it neither passed nor failed." + advice;
+
+    const stop: ReplayStop = {
+      step: position, step_name: name, reason,
+      recorded_input: recordedInput ?? null, actual_input: input ?? null, message,
+    };
+    this._fidelity!.stopped(stop);
+
+    const s = new Step(name);
+    s.input = input;
+    s.type = recordedType ?? "custom";
+    s.metadata["_source"] = "replay";
+    s.fail(message);
+    this._steps.push(s);
+    return new ReplayStoppedError(stop);
+  }
+
+  private recordedCallsOf(name: string): string {
+    const count = this._recorded!.filter((r) => r.data.name === name).length;
+    return count === 0 ? "the trace never recorded it" : `its ${count} recorded call(s) were already used`;
   }
 
   /** The recorded type of a step name, used and unused alike; null when the trace never recorded it. */
