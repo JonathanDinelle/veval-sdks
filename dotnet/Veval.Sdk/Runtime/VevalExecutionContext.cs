@@ -198,7 +198,7 @@ public class VevalExecutionContext
         {
             try
             {
-                using var doc = JsonDocument.Parse(text);
+                using var doc = JsonDocument.Parse(trimmed);
                 return SnapshotValues.Canonicalize(doc.RootElement.Clone(), ignore);
             }
             catch (JsonException) { /* not JSON after all: compare the text */ }
