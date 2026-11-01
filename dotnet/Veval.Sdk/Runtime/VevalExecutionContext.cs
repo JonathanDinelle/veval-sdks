@@ -71,12 +71,14 @@ public class VevalExecutionContext
             _stepRules.TryGetValue(name, out var rule);
             var recorded = FindRecording(name, input, rule, out var exact);
             var recordedType = recorded?.Data.Type ?? RecordedTypeOf(name);
-            // The recording knows what the step was; the call site's type only fills in for a step it never contained.
-            effectiveType = recordedType ?? declaredType;
+            // A recorded llm or tool type wins; a recorded custom type is what an untyped step is saved as, so it says
+            // nothing and the call site's type applies. A mislabelled call still can't turn a recorded tool step live.
+            var knownType = recordedType is null or StepType.Custom ? null : recordedType;
+            effectiveType = knownType ?? declaredType ?? recordedType;
             // In live mode a model step runs for real, including extra calls of a step recorded as a model step and
             // model steps the recording never contained.
             var runLive = _liveModelSteps && effectiveType == StepType.Llm;
-            var conflictingType = recordedType != null && declaredType != null && declaredType != recordedType
+            var conflictingType = knownType != null && declaredType != null && declaredType != knownType
                 ? declaredType : null;
 
             if (recorded == null && !runLive && _strictMockMode)
@@ -89,7 +91,7 @@ public class VevalExecutionContext
             }
 
             // A live model handed a recording from another path would reason over a page it never reached.
-            if (_liveModelSteps && !runLive && recorded != null && !exact && StopsOnDivergence(rule, recorded.Data.Type))
+            if (_liveModelSteps && !runLive && recorded != null && !exact && StopsOnDivergence(rule, effectiveType))
                 throw StopAt(name, ReplayStopReason.Diverged, recorded.Data.Input, input, effectiveType);
 
             if (recorded != null) recorded.Consumed = true;
@@ -116,7 +118,7 @@ public class VevalExecutionContext
                 else result = default!;
 
                 // Keep the recorded type so ToolCalled and snapshot types behave the same as in the original run.
-                var mocked = new Step(name, null) { Input = input, Type = recorded.Data.Type };
+                var mocked = new Step(name, null) { Input = input, Type = effectiveType ?? StepType.Custom };
                 mocked.Metadata["_source"] = "replay";
                 mocked.Complete(result);
                 _steps.Add(mocked);
@@ -225,7 +227,7 @@ public class VevalExecutionContext
         return SnapshotValues.Canonicalize(input, ignore);
     }
 
-    /// <summary>Whether a diverged call of this step stops a live replay: the step's rule decides, else its recorded type.</summary>
+    /// <summary>Whether a diverged call of this step stops a live replay: the step's rule decides, else its type.</summary>
     private bool StopsOnDivergence(ReplayStepRule? rule, string? recordedType) =>
         rule?.OnDivergence is { } policy
             ? policy == OnDivergence.Stop

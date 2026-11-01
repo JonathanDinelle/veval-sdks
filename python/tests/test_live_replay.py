@@ -440,3 +440,24 @@ def test_options_reject_the_old_positional_arguments():
     with pytest.raises(TypeError):
         asyncio.run(sdk().run_scenario_async("s", lambda ctx: "x", [], [], True))
 
+
+def test_live_replay_runs_a_step_recorded_untyped_when_the_call_site_says_llm():
+    # An older trace, or a model call that threw before set_meta ran: the model step was saved as custom.
+    trace = briefing_trace()
+    trace.steps[1].type = "custom"
+    model_calls = []
+
+    async def agent(ctx):
+        await ctx.track_step_async("visit_portal", "today", returning("live"))
+        return await ctx.track_step_async(
+            "write_briefing", REGRESSED_PROMPT, returning(fake_model(REGRESSED_PROMPT), lambda: model_calls.append(1)),
+            StepOptions(type=StepType.LLM))
+
+    result = asyncio.run(sdk().replay_async(trace, agent, ReplayOptions(
+        live_model_steps=True, assertions=[TraceAssert.output_contains("OVERDUE")],
+    )))
+    assert model_calls == [1]  # custom says nothing about the step, so the call site's llm applies
+    assert result.outcome == "failed"  # the regressed prompt ran live and lost the overdue-first rule
+    last = result.fidelity.bindings[-1]
+    assert (last.kind, last.declared_type) == ("live", None)
+

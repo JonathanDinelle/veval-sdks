@@ -348,3 +348,20 @@ test("a recorded run carries the call-site type, and setMeta still overrides it"
 
   assert.deepEqual(ctx.steps.map((s) => s.type), ["llm", "tool", "custom"]);
 });
+
+test("live replay runs a step recorded untyped when the call site says llm", async () => {
+  // An older trace, or a model call that threw before setMeta ran: the model step was saved as custom.
+  const trace = briefingTrace();
+  trace.steps[1].type = "custom";
+  let modelCalls = 0;
+  const result = await sdk().replayAsync(trace, async (ctx) => {
+    await ctx.trackStepAsync("visit_portal", "today", async () => "live");
+    return ctx.trackStepAsync("write_briefing", REGRESSED_PROMPT, async () => { modelCalls++; return fakeModel(REGRESSED_PROMPT); },
+      { type: StepType.Llm });
+  }, { live_model_steps: true, assertions: [TraceAssert.outputContains("OVERDUE")] });
+
+  assert.equal(modelCalls, 1, "custom says nothing about the step, so the call site's llm applies");
+  assert.equal(result.outcome, "failed", "the regressed prompt ran live and lost the overdue-first rule");
+  const last = result.fidelity!.bindings.at(-1)!;
+  assert.deepEqual([last.kind, last.declared_type], ["live", null]);
+});

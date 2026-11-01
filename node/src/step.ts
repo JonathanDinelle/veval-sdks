@@ -90,10 +90,11 @@ export const StepType = {
 /** Settings for one step, given where the step is called. */
 export interface StepOptions {
   /**
-   * The step's type (`StepType`), known before the step runs. A live replay uses it for a step the recording never
-   * contained: a model step (`"llm"`) then runs live instead of stopping the replay. When the recording has the step,
-   * its recorded type wins, and a different type here is reported on the binding (`declared_type`). New recordings
-   * carry this type; `setMeta("type", …)` inside the step still overrides it.
+   * The step's type (`StepType`), known before the step runs. A live replay uses it when the recording doesn't know
+   * the step's type: a step it never contained, or one saved untyped (`"custom"`). A model step (`"llm"`) then runs
+   * live instead of stopping the replay or being served its old output. A recorded `"llm"` or `"tool"` type wins, and
+   * a different type here is reported on the binding (`declared_type`), so a mislabelled call can't turn a recorded
+   * tool step live. New recordings carry this type; `setMeta("type", …)` inside the step still overrides it.
    */
   type?: string;
 }

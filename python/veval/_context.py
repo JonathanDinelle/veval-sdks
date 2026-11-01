@@ -159,13 +159,15 @@ class VevalExecutionContext:
             raise TypeError(f"step_rules['{name}'] must be a ReplayStepRule, not {type(rule).__name__}")
         recorded, exact = self._find_recording(name, input, rule)
         recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
-        # The recording knows what the step was; the call site's type only fills in for a step it never contained.
-        effective_type = recorded_type or declared_type
+        # A recorded llm or tool type wins; a recorded custom type is what an untyped step is saved as, so it says
+        # nothing and the call site's type applies. A mislabelled call still can't turn a recorded tool step live.
+        known_type = recorded_type if recorded_type and recorded_type != "custom" else None
+        effective_type = known_type or declared_type or recorded_type
         # In live mode a model step runs for real, including extra calls of a step recorded as a model step and
         # model steps the recording never contained.
         run_live = self._live_model_steps and effective_type == "llm"
         conflicting_type = (
-            declared_type if recorded_type and declared_type and declared_type != recorded_type else None
+            declared_type if known_type and declared_type and declared_type != known_type else None
         )
 
         if recorded is None and not run_live and self._strict_mock_mode:
@@ -180,7 +182,7 @@ class VevalExecutionContext:
 
         # A live model handed a recording from another path would reason over a page it never reached.
         if (self._live_model_steps and not run_live and recorded is not None and not exact
-                and self._stops_on_divergence(rule, recorded.data.type)):
+                and self._stops_on_divergence(rule, effective_type)):
             raise self._stop_at(name, STOP_DIVERGED, recorded.data.input, input, effective_type)
 
         if recorded is not None:
@@ -202,7 +204,7 @@ class VevalExecutionContext:
         s = Step(name)
         s.input = input
         # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
-        s.type = recorded.data.type or "custom"
+        s.type = effective_type or "custom"
         s.metadata["_source"] = "replay"
         s.complete(mock)
         self._steps.append(s)
@@ -256,7 +258,7 @@ class VevalExecutionContext:
         return match or candidates[0], match is not None
 
     def _stops_on_divergence(self, rule: Optional[ReplayStepRule], recorded_type: Optional[str]) -> bool:
-        """Whether a diverged call of this step stops a live replay: the step's rule decides, else its recorded type."""
+        """Whether a diverged call of this step stops a live replay: the step's rule decides, else its type."""
         if rule is not None and rule.on_divergence is not None:
             return rule.on_divergence == STOP
         return recorded_type is not None and recorded_type in self._stop_on_divergence_types

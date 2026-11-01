@@ -477,4 +477,25 @@ public class LiveReplayTests
 
         ctx.Steps.Select(s => s.Type).Should().Equal("llm", "tool", "custom");
     }
+
+    [Fact]
+    public async Task LiveReplay_RunsAStepRecordedUntyped_WhenTheCallSiteSaysLlm()
+    {
+        // An older trace, or a model call that threw before SetMeta ran: the model step was saved as custom.
+        var trace = BriefingTrace();
+        trace.Steps[1].Type = "custom";
+        var modelCalls = 0;
+
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(trace, async ctx =>
+        {
+            var items = await ctx.TrackStepAsync("visit_portal", "today", () => Task.FromResult("live"));
+            return await ctx.TrackStepAsync("write_briefing", RegressedPrompt,
+                () => { modelCalls++; return Task.FromResult(FakeModel(RegressedPrompt, items)); },
+                new StepOptions { Type = StepType.Llm });
+        }, new ReplayOptions { LiveModelSteps = true, Assertions = [TraceAssert.OutputContains("OVERDUE")] });
+
+        modelCalls.Should().Be(1, "custom says nothing about the step, so the call site's llm applies");
+        result.Outcome.Should().Be(ReplayOutcome.Failed, "the regressed prompt ran live and lost the overdue-first rule");
+        result.Fidelity!.Bindings.Last().Should().Match<ReplayBinding>(b => b.Kind == ReplayBindingKind.Live && b.DeclaredType == null);
+    }
 }
