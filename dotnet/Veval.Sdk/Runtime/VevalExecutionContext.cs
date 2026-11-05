@@ -117,7 +117,8 @@ public class VevalExecutionContext
                 }
                 else result = default!;
 
-                // Keep the recorded type so ToolCalled and snapshot types behave the same as in the original run.
+                // The recorded type, or the call site's when the recording saved the step untyped, so ToolCalled and
+                // snapshot types match the original run wherever the recording knew the step's type.
                 var mocked = new Step(name, null) { Input = input, Type = effectiveType ?? StepType.Custom };
                 mocked.Metadata["_source"] = "replay";
                 mocked.Complete(result);

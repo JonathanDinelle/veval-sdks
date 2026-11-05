@@ -181,7 +181,8 @@ export class VevalExecutionContext {
         const mock = recorded.data.output;
         const s = new Step(name);
         s.input = input;
-        // Keep the recorded type so toolCalled and snapshot types behave the same as in the original run.
+        // The recorded type, or the call site's when the recording saved the step untyped, so toolCalled and
+        // snapshot types match the original run wherever the recording knew the step's type.
         s.type = effectiveType ?? "custom";
         s.metadata["_source"] = "replay";
         s.complete(mock);

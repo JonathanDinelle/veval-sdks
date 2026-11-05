@@ -203,7 +203,8 @@ class VevalExecutionContext:
         mock = recorded.data.output
         s = Step(name)
         s.input = input
-        # Keep the recorded type so tool_called and snapshot types behave the same as in the original run.
+        # The recorded type, or the call site's when the recording saved the step untyped, so tool_called and
+        # snapshot types match the original run wherever the recording knew the step's type.
         s.type = effective_type or "custom"
         s.metadata["_source"] = "replay"
         s.complete(mock)
