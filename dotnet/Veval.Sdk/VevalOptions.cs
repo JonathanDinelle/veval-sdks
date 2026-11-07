@@ -13,9 +13,6 @@ public class VevalOptions
     internal string Endpoint { get; init; } =
         Environment.GetEnvironmentVariable("VEVAL_INTERNAL_ENDPOINT") ?? "https://api.veval.dev";
 
-    public int FlushIntervalMs { get; set; } = 5000;
-    public int FlushBatchSize { get; set; } = 50;
-
     /// <summary>
     /// By default a trace or scenario run that can't be delivered (bad API key, quota, network) is
     /// written to standard error as a warning and never breaks the host app. Set this in tests and CI
