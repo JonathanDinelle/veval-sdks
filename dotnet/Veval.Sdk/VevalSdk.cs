@@ -91,8 +91,7 @@ public class VevalSdk : IVevalSdk
         Func<VevalExecutionContext, Task<T>> agent,
         ITraceAssertion[] scenarioAssertions,
         ScenarioItem[]? items = null,
-        bool mockModelSteps = false,
-        IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null)
+        ScenarioOptions? options = null)
     {
         // Resolve items: inline takes precedence, otherwise fetch from API
         var resolvedItems = items ?? (await _client.GetScenarioItemsAsync(scenarioName))
@@ -116,7 +115,7 @@ public class VevalSdk : IVevalSdk
                 }
                 else
                 {
-                    var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, mockModelSteps, effectiveAssertions, stepRules));
+                    var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, options ?? new ScenarioOptions(), effectiveAssertions));
                     itemResult.Failures.AddRange(replayResult.Failures);
                     itemResult.Inconclusive = replayResult.Inconclusive;
                     itemResult.Context = replayResult.ReplayedContext;
@@ -164,17 +163,15 @@ public class VevalSdk : IVevalSdk
     /// How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
     /// the whole scenario opts into mocked replay.
     /// </summary>
-    internal static ReplayOptions ScenarioReplayOptions(
-        ScenarioItem item, bool mockModelSteps, ITraceAssertion[] assertions,
-        IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null)
+    internal static ReplayOptions ScenarioReplayOptions(ScenarioItem item, ScenarioOptions options, ITraceAssertion[] assertions)
     {
-        var mocked = mockModelSteps || item.MockModelSteps;
+        var mocked = options.MockModelSteps || item.MockModelSteps;
         return new ReplayOptions
         {
             MockLlmResponses = mocked,
             LiveModelSteps = !mocked,
             Assertions = assertions,
-            StepRules = MergeStepRules(stepRules, item.StepRules),
+            StepRules = MergeStepRules(options.StepRules, item.StepRules),
         };
     }
 

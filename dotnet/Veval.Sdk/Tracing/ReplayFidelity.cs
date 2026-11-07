@@ -15,7 +15,14 @@ public enum ReplayBindingKind
 /// One replayed call and the recorded step bound to it. <see cref="RecordedIndex"/> is null for a live model call
 /// beyond the ones recorded.
 /// </summary>
-public record ReplayBinding(string StepName, ReplayBindingKind Kind, int? RecordedIndex, object? RecordedInput, object? ActualInput);
+public record ReplayBinding(string StepName, ReplayBindingKind Kind, int? RecordedIndex, object? RecordedInput, object? ActualInput)
+{
+    /// <summary>
+    /// The type the call site gave (<see cref="StepOptions.Type"/>) when it differs from the recorded type, or null.
+    /// The recorded type won: a mislabelled call can't turn a recorded tool step live.
+    /// </summary>
+    public string? DeclaredType { get; init; }
+}
 
 /// <summary>A recorded step the replay never called.</summary>
 public record UnusedRecording(string StepName, int RecordedIndex);

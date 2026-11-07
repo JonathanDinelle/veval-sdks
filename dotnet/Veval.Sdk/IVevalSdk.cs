@@ -26,14 +26,7 @@ public interface IVevalSdk : IDisposable
     Task<SnapshotDiff> CompareSnapshotAsync(string snapshotName, SnapshotData snapshot, VevalExecutionContext ctx, SnapshotOptions? options = null);
 
     Task<ReplayResult> ReplayAsync<T>(TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options);
-    /// <param name="mockModelSteps">
-    /// Replay every trace-backed item fully mocked, as if each set <see cref="ScenarioItem.MockModelSteps"/>; this is
-    /// the switch for items loaded from the dashboard. <see cref="VevalTestSdk"/> always replays mocked.
-    /// </param>
-    /// <param name="stepRules">
-    /// <see cref="ReplayOptions.StepRules"/> for every trace-backed item; an item's own <see cref="ScenarioItem.StepRules"/>
-    /// entry for the same step replaces the scenario's.
-    /// </param>
-    Task<ScenarioRunResult> RunScenarioAsync<T>(string scenarioName, Func<VevalExecutionContext, Task<T>> agent, ITraceAssertion[] scenarioAssertions, ScenarioItem[]? items = null, bool mockModelSteps = false, IReadOnlyDictionary<string, ReplayStepRule>? stepRules = null);
+    /// <param name="options">Settings for every item: fully mocked replay, step rules (<see cref="ScenarioOptions"/>).</param>
+    Task<ScenarioRunResult> RunScenarioAsync<T>(string scenarioName, Func<VevalExecutionContext, Task<T>> agent, ITraceAssertion[] scenarioAssertions, ScenarioItem[]? items = null, ScenarioOptions? options = null);
     Task<JudgeResult> JudgeAsync(string criteria, VevalExecutionContext ctx, JudgeOptions? options = null);
 }

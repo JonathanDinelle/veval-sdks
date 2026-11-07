@@ -44,7 +44,7 @@ public class LiveReplayTests
     /// <summary>Replays the trace the way <c>VevalSdk.RunScenarioAsync</c> replays a trace-backed item.</summary>
     private static Task<ReplayResult> ReplayAsScenarioItem(string prompt, ScenarioItem item, bool scenarioMock = false, Action? onPortalVisit = null) =>
         new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), BriefingAgent(prompt, onPortalVisit),
-            VevalSdk.ScenarioReplayOptions(item, scenarioMock, [TraceAssert.OutputContains("OVERDUE")]));
+            VevalSdk.ScenarioReplayOptions(item, new ScenarioOptions { MockModelSteps = scenarioMock }, [TraceAssert.OutputContains("OVERDUE")]));
 
     [Fact]
     public async Task TraceBackedItem_CatchesARegressedPrompt_AndPassesTheUnchangedOne()
@@ -334,13 +334,16 @@ public class LiveReplayTests
             TraceId = "tr_browser",
             StepRules = { ["fill"] = new ReplayStepRule { OnDivergence = OnDivergence.Serve } },
         };
-        var scenarioRules = new Dictionary<string, ReplayStepRule>
+        var scenario = new ScenarioOptions
         {
-            ["fill"] = new() { OnDivergence = OnDivergence.Stop },
-            ["narrate"] = new() { MatchOnNameOnly = true },
+            StepRules =
+            {
+                ["fill"] = new() { OnDivergence = OnDivergence.Stop },
+                ["narrate"] = new() { MatchOnNameOnly = true },
+            },
         };
 
-        var options = VevalSdk.ScenarioReplayOptions(item, false, [], scenarioRules);
+        var options = VevalSdk.ScenarioReplayOptions(item, scenario, []);
 
         options.StepRules["fill"].OnDivergence.Should().Be(OnDivergence.Serve);
         options.StepRules["narrate"].MatchOnNameOnly.Should().BeTrue();
@@ -388,5 +391,111 @@ public class LiveReplayTests
         });
 
         result.Outcome.Should().Be(ReplayOutcome.Passed, result.Inconclusive?.Message);
+    }
+
+    // VEV-37: the call site can say a step is a model call before it runs.
+
+    [Fact]
+    public async Task LiveReplay_RunsAModelStepTheRecordingNeverContained_WhenTheCallSiteSaysLlm()
+    {
+        var extracted = false;
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), async ctx =>
+        {
+            var briefing = await BriefingAgent(Prompt)(ctx);
+            await ctx.TrackStepAsync("extraction", briefing, () => { extracted = true; return Task.FromResult("Dentist"); },
+                new StepOptions { Type = StepType.Llm });
+            return briefing;
+        }, new ReplayOptions { LiveModelSteps = true, Assertions = [TraceAssert.OutputContains("OVERDUE")] });
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, result.Inconclusive?.Message);
+        extracted.Should().BeTrue("a model step runs live in a live replay");
+        result.Fidelity!.Bindings.Last().Should().Match<ReplayBinding>(b =>
+            b.StepName == "extraction" && b.Kind == ReplayBindingKind.Live && b.RecordedIndex == null);
+        result.ReplayedContext!.Steps.Last().Type.Should().Be("llm");
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("tool")]
+    public async Task LiveReplay_StillStopsOnAnUnrecordedStepThatIsntMarkedLlm(string? type)
+    {
+        var ran = false;
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), async ctx =>
+        {
+            await BriefingAgent(Prompt)(ctx);
+            return await ctx.TrackStepAsync("charge_card", 42, () => { ran = true; return Task.FromResult("ok"); },
+                new StepOptions { Type = type });
+        }, new ReplayOptions { LiveModelSteps = true });
+
+        ran.Should().BeFalse();
+        result.Inconclusive!.Should().Match<ReplayStop>(s => s.StepName == "charge_card" && s.Reason == ReplayStopReason.NoRecording);
+    }
+
+    [Fact]
+    public async Task LiveReplay_TheRecordedTypeWinsOverTheCallSite_AndTheConflictIsReported()
+    {
+        var portalVisits = 0;
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), async ctx =>
+        {
+            // A mislabelled tool call: the recording knows visit_portal is a tool, so it is still served, not run.
+            var items = await ctx.TrackStepAsync("visit_portal", "today", () => { portalVisits++; return Task.FromResult("live"); },
+                new StepOptions { Type = StepType.Llm });
+            return await ctx.TrackStepAsync("write_briefing", Prompt, () => Task.FromResult(FakeModel(Prompt, items)));
+        }, new ReplayOptions { LiveModelSteps = true });
+
+        portalVisits.Should().Be(0);
+        result.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", result.Failures));
+        var portal = result.Fidelity!.Bindings.First();
+        portal.Kind.Should().Be(ReplayBindingKind.Matched);
+        portal.DeclaredType.Should().Be("llm");
+        result.Fidelity.Bindings.Last().DeclaredType.Should().BeNull("no type was declared at that call site");
+    }
+
+    [Fact]
+    public async Task MockedReplay_StillRefusesAnUnrecordedModelStep()
+    {
+        var called = false;
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(BriefingTrace(), async ctx =>
+        {
+            await BriefingAgent(Prompt)(ctx);
+            return await ctx.TrackStepAsync("extraction", "x", () => { called = true; return Task.FromResult("y"); },
+                new StepOptions { Type = StepType.Llm });
+        }, new ReplayOptions { MockLlmResponses = true });
+
+        called.Should().BeFalse("mocked replay never makes a model call");
+        result.Failures.Should().ContainSingle(f => f.Contains("no mock output for step 'extraction'"));
+    }
+
+    [Fact]
+    public async Task ARecordedRun_CarriesTheCallSiteType_AndSetMetaStillOverridesIt()
+    {
+        var ctx = new VevalExecutionContext("tr_x", null);
+        await ctx.TrackStepAsync("extraction", "x", () => Task.FromResult("y"), new StepOptions { Type = StepType.Llm });
+        await ctx.TrackStepAsync("lookup", "x", h => { h.SetMeta("type", "tool"); return Task.FromResult("y"); },
+            new StepOptions { Type = StepType.Llm });
+        await ctx.TrackStepAsync("plain", "x", () => Task.FromResult("y"));
+
+        ctx.Steps.Select(s => s.Type).Should().Equal("llm", "tool", "custom");
+    }
+
+    [Fact]
+    public async Task LiveReplay_RunsAStepRecordedUntyped_WhenTheCallSiteSaysLlm()
+    {
+        // An older trace, or a model call that threw before SetMeta ran: the model step was saved as custom.
+        var trace = BriefingTrace();
+        trace.Steps[1].Type = "custom";
+        var modelCalls = 0;
+
+        var result = await new VevalSdk(new VevalOptions { ApiKey = "test" }).ReplayAsync(trace, async ctx =>
+        {
+            var items = await ctx.TrackStepAsync("visit_portal", "today", () => Task.FromResult("live"));
+            return await ctx.TrackStepAsync("write_briefing", RegressedPrompt,
+                () => { modelCalls++; return Task.FromResult(FakeModel(RegressedPrompt, items)); },
+                new StepOptions { Type = StepType.Llm });
+        }, new ReplayOptions { LiveModelSteps = true, Assertions = [TraceAssert.OutputContains("OVERDUE")] });
+
+        modelCalls.Should().Be(1, "custom says nothing about the step, so the call site's llm applies");
+        result.Outcome.Should().Be(ReplayOutcome.Failed, "the regressed prompt ran live and lost the overdue-first rule");
+        result.Fidelity!.Bindings.Last().Should().Match<ReplayBinding>(b => b.Kind == ReplayBindingKind.Live && b.DeclaredType == null);
     }
 }

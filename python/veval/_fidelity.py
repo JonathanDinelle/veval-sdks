@@ -20,6 +20,9 @@ class ReplayBinding:
     recorded_index: Optional[int]
     recorded_input: Any
     actual_input: Any
+    # The type the call site gave (StepOptions.type) when it differs from the recorded type, or None. The recorded
+    # type won: a mislabelled call can't turn a recorded tool step live.
+    declared_type: Optional[str] = None
 
 
 # What a live replay does with a call whose input matches no unused recording of its step:
