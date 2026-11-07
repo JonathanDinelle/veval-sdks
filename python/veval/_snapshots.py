@@ -21,7 +21,7 @@ class SnapshotStep:
 class SnapshotData:
     """
     A known-good run to compare new runs against: every step in order, with the input the agent sent
-    and the output it got back. Stored server-side by name (``save_snapshot_async``) so it survives
+    and the output it got back. Stored server-side by name (``save_snapshot_async``), pinned so it survives
     trace retention. Legacy snapshots (step names only) have no ``steps`` and are compared on sequence alone.
     """
     id: Optional[str] = None
@@ -90,6 +90,17 @@ def _from_steps(steps: list[SnapshotStep], source_trace_id: Optional[str]) -> Sn
         step_order=names,
         step_count=len(steps),
     )
+
+
+@dataclass
+class SaveSnapshotOptions:
+    """How ``save_snapshot_async`` stores a baseline."""
+    # Keep the baseline past the org's retention. On by default: a baseline you named and saved is meant
+    # to be kept, and an unpinned one disappears after the retention window, failing every comparison
+    # against its name. Pins are limited per plan; saving a new name at the limit raises VevalRequestError
+    # with status 409. Saving again under a pinned name reuses its pin. Set to False to save a baseline
+    # that expires with retention.
+    pinned: bool = True
 
 
 @dataclass
@@ -394,15 +405,18 @@ def _step_payload(s: SnapshotStep) -> dict:
     return {"name": s.name, "type": s.type, "input": s.input, "output": s.output}
 
 
-def save_from_trace_payload(name: str, trace_id: str) -> dict:
-    return {"name": name, "trace_id": trace_id}
+def save_from_trace_payload(name: str, trace_id: str, options: Optional[SaveSnapshotOptions] = None) -> dict:
+    return {"name": name, "trace_id": trace_id, "pinned": (options or SaveSnapshotOptions()).pinned}
 
 
-def save_from_context_payload(name: str, ctx: VevalExecutionContext) -> dict:
+def save_from_context_payload(
+    name: str, ctx: VevalExecutionContext, options: Optional[SaveSnapshotOptions] = None
+) -> dict:
     return {
         "name": name,
         "source_trace_id": ctx.trace_id,
         "steps": [_step_payload(s) for s in SnapshotData.from_context(ctx).steps],
+        "pinned": (options or SaveSnapshotOptions()).pinned,
     }
 
 

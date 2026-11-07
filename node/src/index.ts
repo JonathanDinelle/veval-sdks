@@ -18,6 +18,7 @@ export {
   SnapshotData,
   SnapshotDataHelper,
   SnapshotOptions,
+  SaveSnapshotOptions,
   SnapshotChange,
   SnapshotChangeKind,
   SnapshotAlignmentRow,

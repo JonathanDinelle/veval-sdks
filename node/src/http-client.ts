@@ -121,13 +121,23 @@ export class VevalHttpClient {
    * make every later comparison fail, or compare against a stale one.
    */
   async createSnapshotAsync(payload: unknown): Promise<SnapshotData> {
-    const res = await fetch(`${this.endpoint}/v1/snapshots`, {
-      method: "POST",
-      headers: this.headers,
-      body: JSON.stringify(payload),
-    });
+    const what = "Saving snapshot";
+    let res: Response;
+    try {
+      res = await fetch(`${this.endpoint}/v1/snapshots`, {
+        method: "POST",
+        headers: this.headers,
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      throw new VevalRequestError(`Veval: ${what} failed: ${networkFailureReason(err)}`);
+    }
     if (!res.ok) {
-      throw new Error(`Saving snapshot failed with status ${res.status}: ${await res.text()}`);
+      // 409 is the plan's pinned-snapshot limit; the server's message says how many are pinned.
+      const hint = res.status === 409
+        ? " — or pass { pinned: false } to save it unpinned (it then expires with retention)"
+        : "";
+      throw new VevalRequestError(`Veval: ${what} failed with status ${res.status}${await reason(res)}${hint}`, res.status);
     }
     return (await res.json()) as SnapshotData;
   }

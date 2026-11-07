@@ -203,7 +203,8 @@ When a live replay leaves its recording (a step recorded as `tool` called with a
 Store a known-good run — every step with its input and output — then detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered.
 
 ```csharp
-// Save a baseline from a recorded trace. The trace is pinned, so retention never deletes it.
+// Save a baseline from a recorded trace. The baseline and the trace are pinned, so retention doesn't delete
+// them. Pins are limited per plan; pass new SaveSnapshotOptions { Pinned = false } to save one that expires.
 await veval.SaveSnapshotAsync("my-agent-baseline", "tr_abc123");
 
 // In tests: an assertion like any other. A missing baseline fails; it never passes silently.
@@ -272,7 +273,7 @@ public class SupportAgent(IVevalSdk veval, IMyLlm llm, IKnowledgeBase kb)
 | `ReplayAsync<T>(trace, callback, options)` | Replay a trace with recorded outputs and assertions |
 | `RunScenarioAsync<T>(name, agent, assertions, items?)` | Run a scenario; omit `items` to load them from the dashboard |
 | `JudgeAsync(criteria, ctx, options?)` | Score a run against a rubric (used by `TraceAssert.Judge`) |
-| `SaveSnapshotAsync(name, traceId)` / `SaveSnapshotAsync(name, ctx)` | Store a named baseline; saving by trace pins it |
+| `SaveSnapshotAsync(name, traceId, options?)` / `SaveSnapshotAsync(name, ctx, options?)` | Store a named, pinned baseline (`SaveSnapshotOptions.Pinned`, default true); throws `VevalRequestException` (409 at the plan's pin limit) |
 | `GetSnapshotAsync(name)` | Load the latest stored baseline (`null` if none) |
 | `CompareSnapshotAsync(name, snapshot, ctx, options?)` | Diff a run against a baseline and record it |
 | `LoadSnapshotAsync(traceId)` | Build a snapshot from a trace on the fly (not pinned) |

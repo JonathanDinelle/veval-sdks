@@ -11,7 +11,7 @@ export interface SnapshotStep {
 
 /**
  * A known-good run to compare new runs against: every step in order, with the input the agent sent and
- * the output it got back. Stored server-side by name (`saveSnapshotAsync`) so it survives trace retention.
+ * the output it got back. Stored server-side by name (`saveSnapshotAsync`), pinned so it survives retention.
  * Legacy snapshots (step names only) have an empty `steps` array and are compared on sequence alone.
  */
 export interface SnapshotData {
@@ -24,6 +24,18 @@ export interface SnapshotData {
   step_names: string[];
   step_order: string[];
   step_count: number;
+}
+
+/** How `saveSnapshotAsync` stores a baseline. */
+export interface SaveSnapshotOptions {
+  /**
+   * Keep the baseline past the org's retention. Default true: a baseline you named and saved is meant to be
+   * kept, and an unpinned one disappears after the retention window, failing every comparison against its
+   * name. Pins are limited per plan; saving a new name at the limit throws a `VevalRequestError` with status
+   * 409. Saving again under a pinned name reuses its pin. Set to false to save a baseline that expires with
+   * retention.
+   */
+  pinned?: boolean;
 }
 
 /** What a snapshot comparison checks beyond the step sequence, which is always compared. */
@@ -372,12 +384,17 @@ const step = (s: SnapshotStep) => ({ name: s.name, type: s.type ?? null, input: 
 
 /** Wire shapes for snapshot calls. */
 export const SnapshotPayloads = {
-  saveFromTrace: (name: string, traceId: string) => ({ name, trace_id: traceId }),
+  saveFromTrace: (name: string, traceId: string, options?: SaveSnapshotOptions) => ({
+    name,
+    trace_id: traceId,
+    pinned: options?.pinned ?? true,
+  }),
 
-  saveFromContext: (name: string, ctx: VevalExecutionContext) => ({
+  saveFromContext: (name: string, ctx: VevalExecutionContext, options?: SaveSnapshotOptions) => ({
     name,
     source_trace_id: ctx.traceId,
     steps: SnapshotDataHelper.fromContext(ctx).steps.map(step),
+    pinned: options?.pinned ?? true,
   }),
 
   /** A scenario-run body the dashboard renders as a step-by-step snapshot diff. */

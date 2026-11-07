@@ -146,7 +146,8 @@ Each call gets the recorded step with the same name and an identical input, or e
 Store a known-good run — every step with its input and output — and detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered:
 
 ```python
-# Save a baseline from a recorded trace. The trace is pinned, so retention never deletes it.
+# Save a baseline from a recorded trace. The baseline and the trace are pinned, so retention doesn't delete
+# them. Pins are limited per plan; pass SaveSnapshotOptions(pinned=False) to save one that expires.
 asyncio.run(sdk.save_snapshot_async("my-baseline", "tr_abc123"))
 
 # In tests: an assertion like any other. A missing baseline fails; it never passes silently.
@@ -193,7 +194,7 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 | `run_async(name, callback, input)` | Run agent and send trace |
 | `run(name, callback, input)` | Synchronous `run_async`, for a plain-function agent |
 | `get_trace_async(trace_id)` / `get_trace(trace_id)` | Fetch a recorded trace |
-| `save_snapshot_async(name, trace_id_or_ctx)` | Store a named baseline (pins the trace) |
+| `save_snapshot_async(name, trace_id_or_ctx, options=None)` | Store a named, pinned baseline (`SaveSnapshotOptions.pinned`, default True); raises `VevalRequestError` (409 at the plan's pin limit) |
 | `get_snapshot_async(name)` | Load the latest stored baseline |
 | `load_snapshot_async(trace_id)` | Build a snapshot from a trace (not pinned) |
 | `compare_snapshot_async(name, snapshot, ctx, options)` | Diff a run against a baseline and record it |

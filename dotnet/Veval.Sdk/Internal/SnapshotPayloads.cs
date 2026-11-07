@@ -5,13 +5,15 @@ internal static class SnapshotPayloads
 {
     public static object Step(SnapshotStep s) => new { name = s.Name, type = s.Type, input = s.Input, output = s.Output };
 
-    public static object SaveFromTrace(string name, string traceId) => new { name, trace_id = traceId };
+    public static object SaveFromTrace(string name, string traceId, SaveSnapshotOptions? options) =>
+        new { name, trace_id = traceId, pinned = (options ?? new()).Pinned };
 
-    public static object SaveFromContext(string name, VevalExecutionContext ctx) => new
+    public static object SaveFromContext(string name, VevalExecutionContext ctx, SaveSnapshotOptions? options) => new
     {
         name,
         source_trace_id = ctx.TraceId,
         steps = SnapshotData.FromContext(ctx).Steps.Select(Step),
+        pinned = (options ?? new()).Pinned,
     };
 
     /// <summary>A scenario-run body the dashboard renders as a step-by-step snapshot diff.</summary>

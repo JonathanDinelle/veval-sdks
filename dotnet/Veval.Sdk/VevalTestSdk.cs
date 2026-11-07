@@ -127,11 +127,11 @@ public class VevalTestSdk : IVevalSdk
         return this;
     }
 
-    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId) =>
-        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromTrace(snapshotName, traceId));
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId, SaveSnapshotOptions? options = null) =>
+        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromTrace(snapshotName, traceId, options));
 
-    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx) =>
-        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromContext(snapshotName, ctx));
+    public Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx, SaveSnapshotOptions? options = null) =>
+        _reportingClient.CreateSnapshotAsync(SnapshotPayloads.SaveFromContext(snapshotName, ctx, options));
 
     public Task<SnapshotData?> GetSnapshotAsync(string snapshotName) =>
         _snapshots.TryGetValue(snapshotName, out var local)
