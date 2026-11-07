@@ -25,7 +25,7 @@ public static class TraceAssert
 
     /// <summary>
     /// Like <see cref="MatchesSnapshot(SnapshotData, SnapshotOptions?)"/>, loading the named baseline stored in Veval
-    /// (see <see cref="IVevalSdk.SaveSnapshotAsync(string, string)"/>). A missing baseline fails the assertion.
+    /// (see <see cref="IVevalSdk.SaveSnapshotAsync(string, string, SaveSnapshotOptions?)"/>). A missing baseline fails the assertion.
     /// </summary>
     public static ITraceAssertion MatchesSnapshot(IVevalSdk veval, string snapshotName, SnapshotOptions? options = null) =>
         new SnapshotAssertion(_ => veval.GetSnapshotAsync(snapshotName), snapshotName, options);

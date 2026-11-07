@@ -12,7 +12,7 @@ public class SnapshotStep
 
 /// <summary>
 /// A known-good run to compare new runs against: every step in order, with the input the agent sent
-/// and the output it got back. Stored server-side by name (<see cref="IVevalSdk.SaveSnapshotAsync(string, string)"/>)
+/// and the output it got back. Stored server-side by name (<see cref="IVevalSdk.SaveSnapshotAsync(string, string, SaveSnapshotOptions?)"/>)
 /// so it survives trace retention.
 /// </summary>
 public class SnapshotData

@@ -7,17 +7,19 @@ public interface IVevalSdk : IDisposable
     Task<T> RunAsync<T>(string agentName, Func<VevalExecutionContext, Task<T>> callback, object? input = null);
     Task<TraceData?> GetTraceAsync(string traceId);
 
-    /// <summary>Builds a snapshot from a trace on the fly. Prefer <see cref="SaveSnapshotAsync(string, string)"/>, which survives trace retention.</summary>
+    /// <summary>Builds a snapshot from a trace on the fly. Prefer <see cref="SaveSnapshotAsync(string, string, SaveSnapshotOptions?)"/>, which survives trace retention.</summary>
     Task<SnapshotData?> LoadSnapshotAsync(string traceId);
 
     /// <summary>
-    /// Stores a named baseline built from a recorded trace — every step with its input and output — and pins
-    /// the trace so retention never deletes it. Saving again under the same name replaces the baseline.
+    /// Stores a named baseline built from a recorded trace — every step with its input and output. The baseline
+    /// and its trace are pinned, so retention doesn't delete them (see <see cref="SaveSnapshotOptions.Pinned"/>).
+    /// Saving again under the same name replaces the baseline. Throws <see cref="VevalRequestException"/> if
+    /// the baseline couldn't be saved, including 409 when the plan's pin limit is reached.
     /// </summary>
-    Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId);
+    Task<SnapshotData> SaveSnapshotAsync(string snapshotName, string traceId, SaveSnapshotOptions? options = null);
 
     /// <summary>Stores a named baseline from a run you just executed (e.g. a replay or a test run).</summary>
-    Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx);
+    Task<SnapshotData> SaveSnapshotAsync(string snapshotName, VevalExecutionContext ctx, SaveSnapshotOptions? options = null);
 
     /// <summary>The latest stored baseline with this name, or null if none exists.</summary>
     Task<SnapshotData?> GetSnapshotAsync(string snapshotName);

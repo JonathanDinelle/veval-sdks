@@ -17,7 +17,9 @@ from ._scenarios import ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRu
 from ._fidelity import ReplayStepRule
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
-from ._snapshots import save_from_context_payload, save_from_trace_payload, snapshot_run_payload
+from ._snapshots import (
+    SaveSnapshotOptions, save_from_context_payload, save_from_trace_payload, snapshot_run_payload,
+)
 
 T = TypeVar("T")
 
@@ -131,15 +133,19 @@ class VevalSdk:
         self,
         snapshot_name: str,
         source: Union[str, VevalExecutionContext],
+        options: Optional[SaveSnapshotOptions] = None,
     ) -> SnapshotData:
         """
-        Stores a named baseline — from a recorded trace ID (the trace is pinned so retention never
-        deletes it), or from a run you just executed. Saving again under the same name replaces it.
+        Stores a named baseline — from a recorded trace ID, or from a run you just executed. The
+        baseline and its trace are pinned, so retention doesn't delete them (see
+        SaveSnapshotOptions.pinned). Saving again under the same name replaces it. Raises
+        VevalRequestError if the baseline couldn't be saved, including 409 when the plan's pin limit
+        is reached.
         """
         payload = (
-            save_from_trace_payload(snapshot_name, source)
+            save_from_trace_payload(snapshot_name, source, options)
             if isinstance(source, str)
-            else save_from_context_payload(snapshot_name, source)
+            else save_from_context_payload(snapshot_name, source, options)
         )
         return await self._client.create_snapshot_async(payload)
 

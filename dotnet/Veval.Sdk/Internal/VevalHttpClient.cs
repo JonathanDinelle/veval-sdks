@@ -132,21 +132,36 @@ internal class VevalHttpClient : IDisposable
     }
 
     /// <summary>
-    /// Saves a named snapshot baseline. Throws on failure — a baseline that silently didn't save would make
-    /// every later comparison fail (or worse, compare against a stale one).
+    /// Saves a named snapshot baseline. Throws <see cref="VevalRequestException"/> on failure — a baseline
+    /// that silently didn't save would make every later comparison fail (or worse, compare against a stale one).
     /// </summary>
     internal async Task<SnapshotData> CreateSnapshotAsync(object payload)
     {
-        var json = JsonSerializer.Serialize(payload);
-        var content = new StringContent(json, Encoding.UTF8, "application/json");
-        var response = await _http.PostAsync($"{_endpoint}/v1/snapshots", content);
+        const string what = "Saving snapshot";
+        var content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+        HttpResponseMessage response;
+        try
+        {
+            response = await _http.PostAsync($"{_endpoint}/v1/snapshots", content);
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            throw new VevalRequestException($"Veval: {what} failed: {ex.Message}", null, ex);
+        }
 
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Saving snapshot failed with status {(int)response.StatusCode}: {await response.Content.ReadAsStringAsync()}");
+        using (response)
+        {
+            var status = (int)response.StatusCode;
+            if (!response.IsSuccessStatusCode)
+            {
+                // 409 is the plan's pinned-snapshot limit; the server's message says how many are pinned.
+                var hint = status == 409 ? " — or pass new SaveSnapshotOptions { Pinned = false } to save it unpinned (it then expires with retention)" : "";
+                throw new VevalRequestException($"Veval: {what} failed with status {status}{await ReasonAsync(response)}{hint}", status);
+            }
 
-        return JsonSerializer.Deserialize<SnapshotData>(await response.Content.ReadAsStringAsync())
-            ?? throw new InvalidOperationException("Snapshot response could not be parsed.");
+            return JsonSerializer.Deserialize<SnapshotData>(await response.Content.ReadAsStringAsync())
+                ?? throw new VevalRequestException($"Veval: {what} returned a response that could not be parsed.", status);
+        }
     }
 
     /// <summary>

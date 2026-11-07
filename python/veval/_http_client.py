@@ -118,12 +118,27 @@ class VevalHttpClient:
         )
 
     async def create_snapshot_async(self, payload: Any) -> SnapshotData:
-        # Raises on failure — a baseline that silently didn't save would make every later
-        # comparison fail, or compare against a stale one.
-        data = await _in_executor(
-            self._post_json, f"{self._endpoint}/v1/snapshots", payload
-        )
+        # Raises VevalRequestError on failure — a baseline that silently didn't save would make
+        # every later comparison fail, or compare against a stale one.
+        data = await _in_executor(self._create_snapshot, payload)
         return SnapshotData.from_dict(data)
+
+    def _create_snapshot(self, payload: Any) -> dict:
+        what = "Saving snapshot"
+        try:
+            return self._post_json(f"{self._endpoint}/v1/snapshots", payload)
+        except HTTPError as ex:
+            # 409 is the plan's pinned-snapshot limit; the server's message says how many are pinned.
+            hint = (
+                " — or pass SaveSnapshotOptions(pinned=False) to save it unpinned (it then expires with retention)"
+                if ex.code == 409 else ""
+            )
+            raise VevalRequestError(
+                f"Veval: {what} failed with status {ex.code}{_reason(ex)}{hint}", ex.code
+            ) from None
+        except OSError as ex:
+            # URLError (no response) and socket timeouts are both OSErrors.
+            raise VevalRequestError(f"Veval: {what} failed: {getattr(ex, 'reason', ex)}") from ex
 
     async def get_snapshot_async(self, name: str) -> Optional[SnapshotData]:
         # Returns None only when no baseline exists (404); any other failure raises, so a network

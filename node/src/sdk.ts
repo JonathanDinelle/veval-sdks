@@ -9,6 +9,7 @@ import {
   SnapshotComparer,
   SnapshotOptions,
   SnapshotPayloads,
+  SaveSnapshotOptions,
 } from "./snapshots";
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ReplayStepRule } from "./fidelity";
@@ -114,13 +115,19 @@ export class VevalSdk {
   }
 
   /**
-   * Stores a named baseline — from a recorded trace ID (the trace is pinned so retention never deletes it),
-   * or from a run you just executed. Saving again under the same name replaces the baseline.
+   * Stores a named baseline — from a recorded trace ID, or from a run you just executed. The baseline and its
+   * trace are pinned, so retention doesn't delete them (see `SaveSnapshotOptions.pinned`). Saving again under
+   * the same name replaces the baseline. Throws `VevalRequestError` if the baseline couldn't be saved,
+   * including 409 when the plan's pin limit is reached.
    */
-  async saveSnapshotAsync(snapshotName: string, source: string | VevalExecutionContext): Promise<SnapshotData> {
+  async saveSnapshotAsync(
+    snapshotName: string,
+    source: string | VevalExecutionContext,
+    options?: SaveSnapshotOptions
+  ): Promise<SnapshotData> {
     const payload = typeof source === "string"
-      ? SnapshotPayloads.saveFromTrace(snapshotName, source)
-      : SnapshotPayloads.saveFromContext(snapshotName, source);
+      ? SnapshotPayloads.saveFromTrace(snapshotName, source, options)
+      : SnapshotPayloads.saveFromContext(snapshotName, source, options);
     return this.http.createSnapshotAsync(payload);
   }
 
