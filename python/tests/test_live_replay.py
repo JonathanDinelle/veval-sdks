@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from veval._scenario_report import _run_payload  # noqa: E402
 from veval import (  # noqa: E402
-    ItemRunResult, ReplayStop, ScenarioRunResult, ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
+    ItemRunResult, ReplayFidelity, ReplayStop, ScenarioRunResult, ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
     TraceAssert, TraceData, VevalExecutionContext, VevalOptions, VevalSdk, VevalTestSdk,
 )
 
@@ -223,7 +223,7 @@ def test_live_replay_stops_where_a_diverged_tool_step_leaves_the_recording():
     assert [s.name for s in steps] == ["plan", "narrate", "fill"]
     assert steps[-1].status == "error"
     assert result.status == "inconclusive"  # neither passed nor failed, so it mustn't raise the error alert
-    assert result.summary == "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path"
+    assert result.summary == "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path"
 
 
 def test_live_replay_passes_when_only_a_name_matched_narration_step_changes():
@@ -363,24 +363,49 @@ def passed_item():
     return ItemRunResult(item=ScenarioItem())
 
 
+def replayed_item():
+    return ItemRunResult(item=ScenarioItem(), fidelity=ReplayFidelity([]))
+
+
 def inconclusive_item():
     return ItemRunResult(item=ScenarioItem(), inconclusive=ReplayStop(3, "fill", "diverged", None, None, "stopped"))
 
 
 def test_scenario_run_fails_on_any_inconclusive_item_by_default():
-    result = ScenarioRunResult(results=[passed_item(), passed_item(), passed_item(), inconclusive_item()])
+    result = ScenarioRunResult(results=[replayed_item(), replayed_item(), replayed_item(), inconclusive_item()])
 
     assert not result.passed  # a change that sends items off their recorded path mustn't look green
     assert result.inconclusive_rate == 0.25
-    assert result.summary == "failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)"
+    assert result.summary == (
+        "failed: too many inconclusive — 3 passed, 0 failed, 1 inconclusive (25% of replays > 0% allowed), "
+        "3/4 replays stayed on path"
+    )
 
 
 def test_scenario_run_passes_when_the_inconclusive_rate_is_within_the_threshold():
     result = ScenarioRunResult(
-        max_inconclusive_rate=0.25, results=[passed_item(), passed_item(), passed_item(), inconclusive_item()])
+        max_inconclusive_rate=0.25, results=[replayed_item(), replayed_item(), replayed_item(), inconclusive_item()])
 
     assert result.passed
-    assert result.summary == "passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)"
+    assert result.summary == (
+        "passed — 3 passed, 0 failed, 1 inconclusive (25% of replays, within 25% allowed), 3/4 replays stayed on path"
+    )
+
+
+def test_scenario_run_synthetic_items_dont_dilute_the_inconclusive_rate():
+    # Only a replay can be inconclusive: two synthetic items mustn't turn one stop in two replays into 25%.
+    result = ScenarioRunResult(
+        max_inconclusive_rate=0.25, results=[passed_item(), passed_item(), replayed_item(), inconclusive_item()])
+
+    assert result.inconclusive_rate == 0.5
+    assert not result.passed
+
+
+def test_scenario_run_names_failed_items_first_when_both_reasons_apply():
+    failed = ItemRunResult(item=ScenarioItem(), failures=["OutputContains failed"])
+
+    assert ScenarioRunResult(results=[failed, inconclusive_item()]).summary.startswith(
+        "failed — 0 passed, 1 failed, 1 inconclusive")
 
 
 def test_scenario_run_a_failed_item_fails_the_run_whatever_the_threshold():
@@ -406,7 +431,7 @@ def test_scenario_run_reports_how_many_replays_stayed_on_path():
 
     assert result.stayed_on_path_rate == 0.5  # the synthetic item wasn't replayed, so it doesn't count
     assert result.summary.endswith(", 1/2 replays stayed on path")
-    assert on_path.summary == "passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path"
+    assert on_path.summary == "passed — 5/5 recorded steps used, 0 diverged but served, 2 live, stayed on path"
 
 
 def test_scenario_run_payload_posts_a_third_outcome_and_the_stop():

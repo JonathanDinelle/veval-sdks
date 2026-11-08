@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ItemRunResult, ReplayOptions, ReplayStoppedError, StepType, TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { ItemRunResult, ReplayFidelity, ReplayOptions, ReplayStoppedError, StepType, TraceAssert, TraceData, VevalExecutionContext } from "../src";
 import { ScenarioReport } from "../src/scenario-report";
 import { recorded, sdk, testSdk } from "./helpers";
 
@@ -187,7 +187,7 @@ test("live replay stops where a diverged tool step leaves the recording", async 
   assert.deepEqual(steps.map((s) => s.name), ["plan", "narrate", "fill"]);
   assert.equal(steps.at(-1)!.status, "error");
   assert.equal(result.status, "inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
-  assert.equal(result.summary, "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path");
+  assert.equal(result.summary, "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path");
 });
 
 test("live replay passes when only a name-matched narration step changes", async () => {
@@ -287,24 +287,41 @@ test("scenario: an inconclusive item is counted apart, and an item rule replaces
 });
 
 const passedItem = (): ItemRunResult => ({ item: { assertions: [] }, passed: true, failures: [] });
+const replayedItem = (): ItemRunResult => ({ ...passedItem(), fidelity: new ReplayFidelity([]) });
 const inconclusiveItem = (): ItemRunResult => ({
   item: { assertions: [] }, passed: false, failures: [],
   inconclusive: { step: 3, step_name: "fill", reason: "diverged", recorded_input: null, actual_input: null, message: "stopped" },
 });
 
 test("scenario run fails on any inconclusive item by default", () => {
-  const result = ScenarioReport.result([passedItem(), passedItem(), passedItem(), inconclusiveItem()]);
+  const result = ScenarioReport.result([replayedItem(), replayedItem(), replayedItem(), inconclusiveItem()]);
 
   assert.equal(result.passed, false, "a change that sends items off their recorded path mustn't look green");
   assert.equal(result.inconclusive_rate, 0.25);
-  assert.equal(result.summary, "failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)");
+  assert.equal(result.summary,
+    "failed: too many inconclusive — 3 passed, 0 failed, 1 inconclusive (25% of replays > 0% allowed), 3/4 replays stayed on path");
 });
 
 test("scenario run passes when the inconclusive rate is within the threshold", () => {
-  const result = ScenarioReport.result([passedItem(), passedItem(), passedItem(), inconclusiveItem()], 0.25);
+  const result = ScenarioReport.result([replayedItem(), replayedItem(), replayedItem(), inconclusiveItem()], 0.25);
 
   assert.equal(result.passed, true);
-  assert.equal(result.summary, "passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)");
+  assert.equal(result.summary,
+    "passed — 3 passed, 0 failed, 1 inconclusive (25% of replays, within 25% allowed), 3/4 replays stayed on path");
+});
+
+test("scenario run: synthetic items don't dilute the inconclusive rate", () => {
+  // Only a replay can be inconclusive: two synthetic items mustn't turn one stop in two replays into 25%.
+  const result = ScenarioReport.result([passedItem(), passedItem(), replayedItem(), inconclusiveItem()], 0.25);
+
+  assert.equal(result.inconclusive_rate, 0.5);
+  assert.equal(result.passed, false);
+});
+
+test("scenario run names failed items first when both reasons apply", () => {
+  const failed: ItemRunResult = { item: { assertions: [] }, passed: false, failures: ["OutputContains failed"] };
+
+  assert.ok(ScenarioReport.result([failed, inconclusiveItem()]).summary.startsWith("failed — 0 passed, 1 failed, 1 inconclusive"));
 });
 
 test("scenario run: a failed item fails the run whatever the threshold", () => {
@@ -329,7 +346,7 @@ test("scenario run reports how many replays stayed on path", async () => {
 
   assert.equal(result.stayed_on_path_rate, 0.5, "the synthetic item wasn't replayed, so it doesn't count");
   assert.ok(result.summary.endsWith(", 1/2 replays stayed on path"), result.summary);
-  assert.equal(onPath.summary, "passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path");
+  assert.equal(onPath.summary, "passed — 5/5 recorded steps used, 0 diverged but served, 2 live, stayed on path");
 });
 
 test("scenario run payload posts a third outcome and the stop", () => {

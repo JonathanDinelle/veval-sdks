@@ -35,14 +35,16 @@ export class ScenarioReport {
   static result(results: ItemRunResult[], maxInconclusiveRate = 0): ScenarioRunResult {
     for (const r of results) {
       r.outcome = r.inconclusive ? "inconclusive" : r.passed ? "passed" : "failed";
+      r.replayed = !!r.fidelity || !!r.inconclusive;
       r.summary = replaySummary(r.failures, r.inconclusive, r.fidelity);
     }
     const passCount = results.filter((r) => r.outcome === "passed").length;
     const inconclusiveCount = results.filter((r) => r.outcome === "inconclusive").length;
     const failCount = results.length - passCount - inconclusiveCount;
-    const inconclusiveRate = results.length === 0 ? 0 : inconclusiveCount / results.length;
-    const replayed = results.filter((r) => r.fidelity).length;
-    const stayedOnPath = results.filter((r) => r.fidelity && !r.inconclusive).length;
+    // Only a replay can be inconclusive, so synthetic items don't dilute the rate.
+    const replayed = results.filter((r) => r.replayed).length;
+    const stayedOnPath = replayed - inconclusiveCount;
+    const inconclusiveRate = replayed === 0 ? 0 : inconclusiveCount / replayed;
     const counts = {
       passed: failCount === 0 && inconclusiveRate <= maxInconclusiveRate,
       pass_count: passCount,
@@ -73,7 +75,7 @@ export class ScenarioReport {
         // Kept for readers that predate outcome: true only when the item passed.
         passed: r.outcome === "passed",
         outcome: r.outcome,
-        replayed: !!r.fidelity,
+        replayed: !!r.replayed,
         inconclusive: r.inconclusive
           ? {
               step: r.inconclusive.step,

@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 def replay_summary(failures: list[str], stop: Optional[ReplayStop], fidelity: Optional[ReplayFidelity]) -> str:
     """The one-line summary on a replay or item result, e.g.
-    "passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path"."""
+    "passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path"."""
     if stop is not None:
         head = f"inconclusive at step {stop.step} '{stop.step_name}'"
     else:
@@ -20,27 +20,33 @@ def replay_summary(failures: list[str], stop: Optional[ReplayStop], fidelity: Op
     used = len({b.recorded_index for b in fidelity.bindings if b.recorded_index is not None})
     recorded = used + len(fidelity.unused)
     return (
-        f"{head} — {used}/{recorded} recorded steps used, {fidelity.diverged} diverged, {fidelity.live} live, "
+        f"{head} — {used}/{recorded} recorded steps used, {fidelity.diverged} diverged but served, {fidelity.live} live, "
         + ("left the path" if stop is not None else "stayed on path")
     )
 
 
 def scenario_summary(result: ScenarioRunResult) -> str:
     """The one-line summary on a scenario run result."""
+    too_many_inconclusive = result.inconclusive_rate > result.max_inconclusive_rate
+    # The reason comes first: "failed ... 0 failed" would otherwise read like a bug.
+    if result.passed:
+        head = "passed"
+    elif result.fail_count == 0 and too_many_inconclusive:
+        head = "failed: too many inconclusive"
+    else:
+        head = "failed"
     line = (
-        f"{'passed' if result.passed else 'failed'} — {result.pass_count} passed, {result.fail_count} failed, "
-        f"{result.inconclusive_count} inconclusive"
+        f"{head} — {result.pass_count} passed, {result.fail_count} failed, {result.inconclusive_count} inconclusive"
     )
     if result.inconclusive_count > 0:
         rate, allowed = _percent(result.inconclusive_rate), _percent(result.max_inconclusive_rate)
         line += (
-            f" ({rate} > {allowed} allowed)" if result.inconclusive_rate > result.max_inconclusive_rate
-            else f" ({rate}, within {allowed} allowed)"
+            f" ({rate} of replays > {allowed} allowed)" if too_many_inconclusive
+            else f" ({rate} of replays, within {allowed} allowed)"
         )
-    replayed = [r for r in result.results if r.fidelity is not None]
+    replayed = sum(1 for r in result.results if r.replayed)
     if replayed:
-        stayed = sum(1 for r in replayed if r.inconclusive is None)
-        line += f", {stayed}/{len(replayed)} replays stayed on path"
+        line += f", {replayed - result.inconclusive_count}/{replayed} replays stayed on path"
     return line
 
 

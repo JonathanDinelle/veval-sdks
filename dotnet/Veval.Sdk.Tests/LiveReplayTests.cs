@@ -243,7 +243,7 @@ public class LiveReplayTests
         result.ReplayedContext!.Steps.Select(s => s.Name).Should().Equal("plan", "narrate", "fill");
         result.ReplayedContext.Steps.Last().Status.Should().Be("error");
         result.Status.Should().Be("inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
-        result.Summary.Should().Be("inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path");
+        result.Summary.Should().Be("inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path");
     }
 
     [Fact]
@@ -371,17 +371,20 @@ public class LiveReplayTests
 
     private static ItemRunResult PassedItem() => new() { Item = new ScenarioItem() };
 
+    private static ItemRunResult ReplayedItem() => new() { Item = new ScenarioItem(), Fidelity = new ReplayFidelity([]) };
+
     private static ItemRunResult InconclusiveItem() =>
         new() { Item = new ScenarioItem(), Inconclusive = new ReplayStop(3, "fill", ReplayStopReason.Diverged, null, null, "stopped") };
 
     [Fact]
     public void ScenarioRun_FailsOnAnyInconclusiveItemByDefault()
     {
-        var result = new ScenarioRunResult { Results = [PassedItem(), PassedItem(), PassedItem(), InconclusiveItem()] };
+        var result = new ScenarioRunResult { Results = [ReplayedItem(), ReplayedItem(), ReplayedItem(), InconclusiveItem()] };
 
         result.Passed.Should().BeFalse("a change that sends items off their recorded path mustn't look green");
         result.InconclusiveRate.Should().Be(0.25);
-        result.Summary.Should().Be("failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)");
+        result.Summary.Should().Be(
+            "failed: too many inconclusive — 3 passed, 0 failed, 1 inconclusive (25% of replays > 0% allowed), 3/4 replays stayed on path");
     }
 
     [Fact]
@@ -390,11 +393,35 @@ public class LiveReplayTests
         var result = new ScenarioRunResult
         {
             MaxInconclusiveRate = 0.25,
-            Results = [PassedItem(), PassedItem(), PassedItem(), InconclusiveItem()],
+            Results = [ReplayedItem(), ReplayedItem(), ReplayedItem(), InconclusiveItem()],
         };
 
         result.Passed.Should().BeTrue();
-        result.Summary.Should().Be("passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)");
+        result.Summary.Should().Be(
+            "passed — 3 passed, 0 failed, 1 inconclusive (25% of replays, within 25% allowed), 3/4 replays stayed on path");
+    }
+
+    [Fact]
+    public void ScenarioRun_SyntheticItemsDontDiluteTheInconclusiveRate()
+    {
+        // Only a replay can be inconclusive: two synthetic items mustn't turn one stop in two replays into 25%.
+        var result = new ScenarioRunResult
+        {
+            MaxInconclusiveRate = 0.25,
+            Results = [PassedItem(), PassedItem(), ReplayedItem(), InconclusiveItem()],
+        };
+
+        result.InconclusiveRate.Should().Be(0.5);
+        result.Passed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void ScenarioRun_NamesFailedItemsFirstWhenBothReasonsApply()
+    {
+        var failed = new ItemRunResult { Item = new ScenarioItem(), Failures = ["OutputContains failed"] };
+        var result = new ScenarioRunResult { Results = [failed, InconclusiveItem()] };
+
+        result.Summary.Should().StartWith("failed — 0 passed, 1 failed, 1 inconclusive");
     }
 
     [Fact]
@@ -434,7 +461,7 @@ public class LiveReplayTests
 
         result.StayedOnPathRate.Should().Be(0.5, "the synthetic item wasn't replayed, so it doesn't count");
         result.Summary.Should().EndWith(", 1/2 replays stayed on path");
-        onPath.Summary.Should().Be("passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path");
+        onPath.Summary.Should().Be("passed — 5/5 recorded steps used, 0 diverged but served, 2 live, stayed on path");
     }
 
     [Fact]

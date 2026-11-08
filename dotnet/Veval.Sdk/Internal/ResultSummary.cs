@@ -2,7 +2,7 @@ namespace Veval.Sdk.Internal;
 
 /// <summary>
 /// The one-line summaries on replay, item and scenario results, e.g.
-/// <c>passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path</c>.
+/// <c>passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path</c>.
 /// </summary>
 internal static class ResultSummary
 {
@@ -15,21 +15,25 @@ internal static class ResultSummary
 
         var used = fidelity.Bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex).Distinct().Count();
         var recorded = used + fidelity.Unused.Count;
-        return $"{head} — {used}/{recorded} recorded steps used, {fidelity.Diverged} diverged, {fidelity.Live} live, " +
+        return $"{head} — {used}/{recorded} recorded steps used, {fidelity.Diverged} diverged but served, {fidelity.Live} live, " +
                (stop != null ? "left the path" : "stayed on path");
     }
 
     public static string ForScenario(ScenarioRunResult result)
     {
-        var line = $"{(result.Passed ? "passed" : "failed")} — {result.PassCount} passed, {result.FailCount} failed, " +
-                   $"{result.InconclusiveCount} inconclusive";
+        var tooManyInconclusive = result.InconclusiveRate > result.MaxInconclusiveRate;
+        // The reason comes first: "failed ... 0 failed" would otherwise read like a bug.
+        var head = result.Passed ? "passed"
+            : result.FailCount == 0 && tooManyInconclusive ? "failed: too many inconclusive"
+            : "failed";
+        var line = $"{head} — {result.PassCount} passed, {result.FailCount} failed, {result.InconclusiveCount} inconclusive";
         if (result.InconclusiveCount > 0)
-            line += result.InconclusiveRate > result.MaxInconclusiveRate
-                ? $" ({Percent(result.InconclusiveRate)} > {Percent(result.MaxInconclusiveRate)} allowed)"
-                : $" ({Percent(result.InconclusiveRate)}, within {Percent(result.MaxInconclusiveRate)} allowed)";
-        var replayed = result.Results.Count(r => r.Fidelity != null);
+            line += tooManyInconclusive
+                ? $" ({Percent(result.InconclusiveRate)} of replays > {Percent(result.MaxInconclusiveRate)} allowed)"
+                : $" ({Percent(result.InconclusiveRate)} of replays, within {Percent(result.MaxInconclusiveRate)} allowed)";
+        var replayed = result.Results.Count(r => r.Replayed);
         if (replayed > 0)
-            line += $", {replayed - result.Results.Count(r => r.Fidelity != null && r.Inconclusive != null)}/{replayed} replays stayed on path";
+            line += $", {replayed - result.InconclusiveCount}/{replayed} replays stayed on path";
         return line;
     }
 

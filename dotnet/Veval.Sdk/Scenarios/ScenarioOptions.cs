@@ -16,7 +16,7 @@ public class ScenarioOptions
     public Dictionary<string, ReplayStepRule> StepRules { get; set; } = new();
 
     /// <summary>
-    /// The largest share of inconclusive items (0 to 1) a passing run may have. Defaults to 0: any inconclusive item
+    /// The largest share of replayed items (0 to 1) that may be inconclusive in a passing run. Defaults to 0: any inconclusive item
     /// fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
     /// some items needing a real run, e.g. 0.1 for one in ten.
     /// </summary>

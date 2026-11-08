@@ -38,6 +38,6 @@ public class ReplayResult
     /// </summary>
     public ReplayFidelity? Fidelity { get; set; }
 
-    /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path</c>.</summary>
+    /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path</c>.</summary>
     public string Summary => Internal.ResultSummary.ForReplay(Failures, Inconclusive, Fidelity);
 }

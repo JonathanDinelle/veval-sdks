@@ -15,8 +15,10 @@ public class ItemRunResult
     public ReplayStop? Inconclusive { get; set; }
     /// <summary>How the item's replay was bound to its recording; null for a synthetic item or a missing trace.</summary>
     public ReplayFidelity? Fidelity { get; set; }
+    /// <summary>The item was a replay of a recorded trace (only a replay can be inconclusive).</summary>
+    public bool Replayed => Fidelity != null || Inconclusive != null;
     public VevalExecutionContext? Context { get; set; }
 
-    /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path</c>.</summary>
+    /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path</c>.</summary>
     public string Summary => ResultSummary.ForReplay(Failures, Inconclusive, Fidelity);
 }

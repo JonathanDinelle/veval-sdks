@@ -46,7 +46,7 @@ def _run_payload(result: ScenarioRunResult, unnamed_item: str) -> dict[str, Any]
                 # Kept for readers that predate outcome: true only when the item passed.
                 "passed": r.passed,
                 "outcome": r.outcome,
-                "replayed": r.fidelity is not None,
+                "replayed": r.replayed,
                 "inconclusive": None if r.inconclusive is None else {
                     "step": r.inconclusive.step,
                     "step_name": r.inconclusive.step_name,

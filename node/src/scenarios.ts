@@ -24,7 +24,7 @@ export interface ScenarioOptions {
   /** `ReplayOptions.step_rules` for every trace-backed item; an item's own entry for the same step replaces it. */
   step_rules?: Record<string, ReplayStepRule>;
   /**
-   * The largest share of inconclusive items (0 to 1) a passing run may have. Defaults to 0: any inconclusive item
+   * The largest share of replayed items (0 to 1) that may be inconclusive in a passing run. Defaults to 0: any inconclusive item
    * fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
    * some items needing a real run, e.g. 0.1 for one in ten.
    */
@@ -48,9 +48,11 @@ export interface ItemRunResult {
   /** How the item's replay was bound to its recording; unset for a synthetic item or a missing trace. */
   fidelity?: ReplayFidelity | null;
   context?: VevalExecutionContext;
+  /** The item was a replay of a recorded trace (only a replay can be inconclusive). Set once the run completes. */
+  replayed?: boolean;
   /** How the item ended: passed, failed, or inconclusive. Set once the run completes. */
   outcome?: ReplayOutcome;
-  /** One line, e.g. `passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path`. Set once the run completes. */
+  /** One line, e.g. `passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path`. Set once the run completes. */
   summary?: string;
 }
 
@@ -65,7 +67,7 @@ export interface ScenarioRunResult {
   fail_count: number;
   /** Items whose live replay left its recording and stopped, so they neither passed nor failed. */
   inconclusive_count: number;
-  /** Inconclusive items as a share of all items, from 0 to 1. */
+  /** Inconclusive items as a share of replayed items, from 0 to 1. Synthetic items don't dilute it. */
   inconclusive_rate: number;
   /** The `ScenarioOptions.max_inconclusive_rate` the run was judged against. */
   max_inconclusive_rate: number;
@@ -74,7 +76,7 @@ export interface ScenarioRunResult {
    * was replayed. How far live replay can be trusted for this change.
    */
   stayed_on_path_rate: number | null;
-  /** One line, e.g. `failed — 5 passed, 0 failed, 1 inconclusive (17% > 0% allowed), 5/6 replays stayed on path`. */
+  /** One line, e.g. `failed: too many inconclusive — 5 passed, 0 failed, 1 inconclusive (17% of replays > 0% allowed), 5/6 replays stayed on path`. */
   summary: string;
   results: ItemRunResult[];
 }

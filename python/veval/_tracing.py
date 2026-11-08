@@ -151,6 +151,6 @@ class ReplayResult:
 
     @property
     def summary(self) -> str:
-        """One line, e.g. "passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path"."""
+        """One line, e.g. "passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path"."""
         from ._summary import replay_summary
         return replay_summary(self.failures, self.inconclusive, self.fidelity)

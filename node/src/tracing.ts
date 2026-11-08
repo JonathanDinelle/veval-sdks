@@ -92,7 +92,7 @@ export interface ReplayResult {
   /** The replay trace's status: "success", "error" (the agent threw), or "inconclusive" (the replay stopped). */
   status: string;
   error: string | null;
-  /** One line, e.g. `passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path`. */
+  /** One line, e.g. `passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path`. */
   summary: string;
   /** How the replay differed from its recording; set when `compare_with_recording` is on. */
   recording_diff?: SnapshotDiff | null;

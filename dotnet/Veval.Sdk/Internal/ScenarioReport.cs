@@ -49,7 +49,7 @@ internal sealed class ScenarioReport
             // Kept for readers that predate outcome: true only when the item passed.
             passed = r.Passed,
             outcome = OutcomeName(r.Outcome),
-            replayed = r.Fidelity != null,
+            replayed = r.Replayed,
             inconclusive = r.Inconclusive is { } stop
                 ? new
                 {

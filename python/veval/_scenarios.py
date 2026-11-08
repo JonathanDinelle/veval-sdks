@@ -17,7 +17,7 @@ class ScenarioOptions:
     mock_model_steps: bool = False
     # ReplayOptions.step_rules for every trace-backed item; an item's own entry for the same step replaces it.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
-    # The largest share of inconclusive items (0 to 1) a passing run may have. Defaults to 0: any inconclusive item
+    # The largest share of replayed items (0 to 1) that may be inconclusive in a passing run. Defaults to 0: any inconclusive item
     # fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
     # some items needing a real run, e.g. 0.1 for one in ten.
     max_inconclusive_rate: float = 0.0
@@ -63,6 +63,11 @@ class ItemRunResult:
         return len(self.failures) == 0 and self.inconclusive is None
 
     @property
+    def replayed(self) -> bool:
+        """The item was a replay of a recorded trace (only a replay can be inconclusive)."""
+        return self.fidelity is not None or self.inconclusive is not None
+
+    @property
     def outcome(self) -> str:
         """How the item ended: "passed", "failed", or "inconclusive" (its live replay left the recording and stopped)."""
         if self.inconclusive is not None:
@@ -71,7 +76,7 @@ class ItemRunResult:
 
     @property
     def summary(self) -> str:
-        """One line, e.g. "passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path"."""
+        """One line, e.g. "passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path"."""
         return replay_summary(self.failures, self.inconclusive, self.fidelity)
 
 
@@ -103,19 +108,21 @@ class ScenarioRunResult:
 
     @property
     def inconclusive_rate(self) -> float:
-        """Inconclusive items as a share of all items, from 0 to 1."""
-        return self.inconclusive_count / len(self.results) if self.results else 0.0
+        """Inconclusive items as a share of replayed items, from 0 to 1. Only a replay can be inconclusive, so
+        synthetic items don't dilute it."""
+        replayed = sum(1 for r in self.results if r.replayed)
+        return self.inconclusive_count / replayed if replayed else 0.0
 
     @property
     def stayed_on_path_rate(self) -> Optional[float]:
         """Replayed items that stayed on their recorded path (didn't stop), as a share of replayed items; None when no
         item was replayed. How far live replay can be trusted for this change."""
-        replayed = [r for r in self.results if r.fidelity is not None]
+        replayed = sum(1 for r in self.results if r.replayed)
         if not replayed:
             return None
-        return sum(1 for r in replayed if r.inconclusive is None) / len(replayed)
+        return (replayed - self.inconclusive_count) / replayed
 
     @property
     def summary(self) -> str:
-        """One line, e.g. "failed — 5 passed, 0 failed, 1 inconclusive (17% > 0% allowed), 5/6 replays stayed on path"."""
+        """One line, e.g. "failed: too many inconclusive — 5 passed, 0 failed, 1 inconclusive (17% of replays > 0% allowed), 5/6 replays stayed on path"."""
         return scenario_summary(self)
