@@ -2,6 +2,7 @@ import type { SnapshotDiff, SnapshotOptions } from "./snapshots";
 import { VevalExecutionContext } from "./context";
 import { ITraceAssertion } from "./assertions";
 import type { ReplayFidelity, ReplayStepRule, ReplayStop } from "./fidelity";
+import type { FaultReport, ReplayFault } from "./faults";
 
 export interface StepData {
   step_id: string;
@@ -70,6 +71,14 @@ export interface ReplayOptions {
    * steps are served the next unused recording and reported in `fidelity`.
    */
   stop_on_divergence_types?: string[];
+  /**
+   * Failures to serve instead of recorded outputs: a timeout, an HTTP error, a rate limit, a malformed output or a
+   * custom error (`ReplayFault`), so the replay runs the agent's retries, fallbacks and guards. Needs a mocked or live
+   * replay. Once a fault has fired, a call that matches no unused recording stops the replay inconclusive instead of
+   * being served a recording from another path; in a live replay, model steps still run live, so the model's reaction
+   * to the error is tested. A fault that never fires fails the replay.
+   */
+  faults?: ReplayFault[];
 }
 
 /** How a replay ended. `inconclusive`: a live replay left its recording and stopped; see `ReplayResult.inconclusive`. */
@@ -98,4 +107,6 @@ export interface ReplayResult {
   recording_diff?: SnapshotDiff | null;
   /** How each call was bound to the recording; set for mocked and live replays (`mock_llm_responses` or `live_model_steps`). */
   fidelity?: ReplayFidelity | null;
+  /** Each fault in `ReplayOptions.faults` and how many times it fired, in declared order. */
+  faults: FaultReport[];
 }

@@ -12,8 +12,9 @@ export function replaySummary(failures: string[], stop: ReplayStop | null | unde
 
   const used = new Set(fidelity.bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index)).size;
   const recorded = used + fidelity.unused.length;
+  const faults = fidelity.faults.length > 0 ? `${count(fidelity.faulted, "fault")} injected, ` : "";
   return `${head} — ${used}/${recorded} recorded steps used, ${fidelity.diverged} diverged but served, ${fidelity.live} live, ` +
-    (stop ? "left the path" : "stayed on path");
+    faults + (stop ? "left the path" : "stayed on path");
 }
 
 /** @internal The one-line summary on a scenario run result. */

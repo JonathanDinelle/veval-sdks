@@ -417,9 +417,16 @@ def _require_no_running_loop(async_name: str) -> None:
 
 
 def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionContext:
+    if options.faults and not options.mock_llm_responses and not options.live_model_steps:
+        raise ValueError(
+            "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.")
     ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
     ctx._is_replay = True
-    rules = {"step_rules": options.step_rules, "stop_on_divergence_types": options.stop_on_divergence_types}
+    rules = {
+        "step_rules": options.step_rules,
+        "stop_on_divergence_types": options.stop_on_divergence_types,
+        "faults": options.faults,
+    }
     if options.live_model_steps:
         ctx.load_mock_outputs(trace, live_model_steps=True, **rules)
     elif options.mock_llm_responses:
@@ -457,6 +464,8 @@ def _replay_result(
         binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
         if binding_failure:
             failures.append(binding_failure)
+        if fidelity is not None:
+            failures.extend(fidelity._unfired_fault_failures(lambda name: sum(1 for s in ctx.steps if s.name == name)))
         failures.extend(assertion_failures)
 
         if options.compare_with_recording is not None:

@@ -6,6 +6,10 @@ internal static class ReplayRunner
     public static async Task<ReplayResult> RunAsync<T>(
         TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
     {
+        if (options.Faults.Count > 0 && !options.MockLlmResponses && !options.LiveModelSteps)
+            throw new ArgumentException(
+                "ReplayOptions.Faults needs a mocked or live replay: set MockLlmResponses or LiveModelSteps.", nameof(options));
+
         var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input) { IsReplay = true };
         if (options.LiveModelSteps)
             ctx.LoadMockOutputs(trace, liveModelSteps: true, options: options);
@@ -43,6 +47,8 @@ internal static class ReplayRunner
             if (error != null) failures.Add($"Replay threw exception: {error}");
             if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
                 failures.Add(bindingFailure);
+            if (ctx.ReplayFidelity is { } fidelity)
+                failures.AddRange(fidelity.UnfiredFaultFailures(name => ctx.Steps.Count(s => s.Name == name)));
             foreach (var assertion in options.Assertions)
             {
                 var failure = await assertion.EvaluateAsync(ctx);

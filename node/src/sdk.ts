@@ -154,6 +154,9 @@ export class VevalSdk {
     callback: (ctx: VevalExecutionContext) => Promise<T>,
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
+    if ((options?.faults?.length ?? 0) > 0 && !options?.mock_llm_responses && !options?.live_model_steps)
+      throw new Error("ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.");
+
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
     markAsReplay(ctx);
     if (options?.live_model_steps) {
@@ -188,6 +191,7 @@ export class VevalSdk {
       if (error) failures.push(`Replay threw exception: ${error}`);
       const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
       if (bindingFailure) failures.push(bindingFailure);
+      failures.push(...(ctx.replayFidelity?.unfiredFaultFailures((name) => ctx.steps.filter((s) => s.name === name).length) ?? []));
       for (const assertion of options?.assertions ?? []) {
         const failure = await assertion.evaluate(ctx);
         if (failure) failures.push(failure);
@@ -209,6 +213,7 @@ export class VevalSdk {
       replayed_context: ctx,
       recording_diff: recordingDiff,
       fidelity: ctx.replayFidelity,
+      faults: ctx.replayFidelity?.faults ?? [],
       output,
       started_at: startedAt.toISOString(),
       completed_at: completedAt.toISOString(),

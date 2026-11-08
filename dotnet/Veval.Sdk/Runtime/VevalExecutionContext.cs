@@ -26,6 +26,7 @@ public class VevalExecutionContext
     private bool _liveModelSteps;
     private IReadOnlyDictionary<string, ReplayStepRule> _stepRules = new Dictionary<string, ReplayStepRule>();
     private ISet<string> _stopOnDivergenceTypes = new HashSet<string> { "tool" };
+    private readonly Dictionary<string, int> _callCounts = new();
 
     /// <summary>Steps recorded so far, in order — readable by custom assertions.</summary>
     public IReadOnlyList<Step> Steps => _steps;
@@ -69,6 +70,10 @@ public class VevalExecutionContext
             if (_fidelity!.Stop is { } stopped) throw new ReplayStoppedException(stopped);
 
             _stepRules.TryGetValue(name, out var rule);
+            _callCounts[name] = _callCounts.TryGetValue(name, out var calls) ? calls + 1 : 1;
+            if (FaultFor(name, input, _callCounts[name], rule) is { } faultIndex)
+                return ServeFault<T>(name, input, faultIndex, rule, declaredType);
+
             var recorded = FindRecording(name, input, rule, out var exact);
             var recordedType = recorded?.Data.Type ?? RecordedTypeOf(name);
             // A recorded llm or tool type wins; a recorded custom type is what an untyped step is saved as, so it says
@@ -80,6 +85,12 @@ public class VevalExecutionContext
             var runLive = _liveModelSteps && effectiveType == StepType.Llm;
             var conflictingType = knownType != null && declaredType != null && declaredType != knownType
                 ? declaredType : null;
+
+            // After a fault, a mocked replay serves only calls that still match their recording: a fallback the
+            // recording never called, or a model call whose prompt now carries the error, has no truthful output.
+            if (!_liveModelSteps && _fidelity!.FirstFired != null && (recorded == null || !exact))
+                throw StopAt(name, recorded == null ? ReplayStopReason.NoRecording : ReplayStopReason.Diverged,
+                    recorded?.Data.Input, input, effectiveType);
 
             if (recorded == null && !runLive && _strictMockMode)
             {
@@ -107,15 +118,7 @@ public class VevalExecutionContext
                 _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input)
                     { DeclaredType = conflictingType });
 
-                var mock = recorded.Data.Output;
-                T result;
-                if (mock is T typed) result = typed;
-                else if (mock != null)
-                {
-                    var json = JsonSerializer.Serialize(mock);
-                    result = JsonSerializer.Deserialize<T>(json)!;
-                }
-                else result = default!;
+                var result = ConvertOutput<T>(recorded.Data.Output);
 
                 // The recorded type, or the call site's when the recording saved the step untyped, so ToolCalled and
                 // snapshot types match the original run wherever the recording knew the step's type.
@@ -145,6 +148,111 @@ public class VevalExecutionContext
 
     private static readonly StepOptions NoOptions = new();
 
+    /// <summary>A recorded (or injected) output as the step's return type, converting through JSON when needed.</summary>
+    private static T ConvertOutput<T>(object? value)
+    {
+        if (value is T typed) return typed;
+        if (value == null) return default!;
+        var json = JsonSerializer.Serialize(value);
+        return JsonSerializer.Deserialize<T>(json)!;
+    }
+
+    /// <summary>The index of the first declared fault that applies to this call of the step, or null.</summary>
+    private int? FaultFor(string name, object? input, int call, ReplayStepRule? rule)
+    {
+        var faults = _fidelity!.DeclaredFaults;
+        for (var i = 0; i < faults.Count; i++)
+        {
+            var fault = faults[i];
+            if (fault.StepName != name || call < fault.FromCall) continue;
+            if (fault.Count is { } limit && _fidelity.FiredCount(i) >= limit) continue;
+            if (fault.HasInput)
+            {
+                var ignore = rule?.IgnoreInputFields is { Count: > 0 } fields
+                    ? fields.OrderBy(f => f, StringComparer.Ordinal).ToArray()
+                    : Array.Empty<string>();
+                if (IgnoringKey(fault.Input, ignore) != IgnoringKey(input, ignore)) continue;
+            }
+            return i;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Serves a fault at this call: records it as a step with <c>_source = "fault"</c> and either throws the fault's
+    /// exception or returns its malformed output. The call uses up no recording, so a retry is served the recorded one.
+    /// </summary>
+    private T ServeFault<T>(string name, object? input, int faultIndex, ReplayStepRule? rule, string? declaredType)
+    {
+        var fault = _fidelity!.DeclaredFaults[faultIndex];
+        _fidelity.Fired(faultIndex);
+        _fidelity.Record(new ReplayBinding(name, ReplayBindingKind.Faulted, null, null, input));
+
+        var recordedType = RecordedTypeOf(name);
+        var type = recordedType is null or StepType.Custom ? declaredType ?? recordedType : recordedType;
+        var step = new Step(name, null) { Input = input, Type = type ?? StepType.Custom };
+        step.Metadata["_source"] = "fault";
+        step.Metadata["_fault"] = fault.Description;
+        _steps.Add(step);
+
+        if (fault.Kind != FaultKind.Malformed)
+        {
+            var exception = fault.CreateException();
+            step.Fail(exception.Message);
+            throw exception;
+        }
+
+        T value;
+        try
+        {
+            value = MalformedOutputOf<T>(fault, name, input, rule);
+        }
+        catch (Exception ex)
+        {
+            step.Fail(ex.Message);
+            throw;
+        }
+        step.Complete(value);
+        return value;
+    }
+
+    private T MalformedOutputOf<T>(ReplayFault fault, string name, object? input, ReplayStepRule? rule)
+    {
+        var holdsText = typeof(T) == typeof(string) || typeof(T) == typeof(object);
+        switch (fault.MalformedOutput)
+        {
+            case MalformedOutput.Empty:
+                return typeof(T) == typeof(string) ? (T)(object)"" : default!;
+            case MalformedOutput.Truncated:
+                if (!holdsText)
+                    throw new InvalidOperationException(
+                        $"Fault on '{name}': a truncated output is JSON text, and the step returns {typeof(T).Name}. " +
+                        "Use it on a step that returns a string or an object, or give the malformed value yourself.");
+                var recorded = FindRecording(name, input, rule, out _)
+                    ?? throw new InvalidOperationException(
+                        $"Fault on '{name}': there is no unused recording of the step to truncate. " +
+                        "Give the malformed value yourself instead.");
+                var text = recorded.Data.Output switch
+                {
+                    string s => s,
+                    JsonElement { ValueKind: JsonValueKind.String } el => el.GetString() ?? "",
+                    var other => JsonSerializer.Serialize(other),
+                };
+                return (T)(object)text.Substring(0, text.Length / 2);
+            default:
+                try
+                {
+                    return ConvertOutput<T>(fault.MalformedValue);
+                }
+                catch (Exception ex) when (ex is JsonException or NotSupportedException)
+                {
+                    throw new InvalidOperationException(
+                        $"Fault on '{name}': the malformed value doesn't convert to {typeof(T).Name}, the step's return " +
+                        "type. Use a value of that type, or make the step return an object.", ex);
+                }
+        }
+    }
+
     public void SetMetadata(string key, object value) => _metadata[key] = value;
 
     internal void RecordJudgment(string criteria, double score, bool passed, string reasoning) =>
@@ -169,7 +277,7 @@ public class VevalExecutionContext
                 "Ensure the trace was recorded with steps before using it for replay.");
 
         _recorded = trace.Steps.Select((step, i) => new RecordedStep(step, i)).ToList();
-        _fidelity = new ReplayFidelity(_recorded.Select(r => new UnusedRecording(r.Data.Name, r.Index)));
+        _fidelity = new ReplayFidelity(_recorded.Select(r => new UnusedRecording(r.Data.Name, r.Index)), options?.Faults);
     }
 
     /// <summary>
@@ -251,7 +359,13 @@ public class VevalExecutionContext
               "match it on name only (StepRules)."
             : " If the model took a different path, record that path. If your code added this call, re-record, or " +
               "replay mocked to test this change.";
-        var message = $"Live replay stopped at step {position} ('{name}'): {detail} " +
+        var fault = _fidelity!.FirstFired;
+        if (fault != null && !_liveModelSteps)
+            advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
+                     "call whose input now carries the error), so no recorded output can stand in for it. Replay live to run " +
+                     "model steps for real, or record a trace of this path.";
+        var where = fault != null ? $" after an injected fault ({fault.Description})" : "";
+        var message = $"{(_liveModelSteps ? "Live replay" : "Replay")} stopped at step {position} ('{name}'){where}: {detail} " +
                       "The replay is inconclusive: it neither passed nor failed." + advice;
 
         var stop = new ReplayStop(position, name, reason, recordedInput, input, message);

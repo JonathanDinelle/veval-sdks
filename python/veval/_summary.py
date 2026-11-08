@@ -19,9 +19,10 @@ def replay_summary(failures: list[str], stop: Optional[ReplayStop], fidelity: Op
 
     used = len({b.recorded_index for b in fidelity.bindings if b.recorded_index is not None})
     recorded = used + len(fidelity.unused)
+    faults = f"{_count(fidelity.faulted, 'fault')} injected, " if fidelity.faults else ""
     return (
         f"{head} — {used}/{recorded} recorded steps used, {fidelity.diverged} diverged but served, {fidelity.live} live, "
-        + ("left the path" if stop is not None else "stayed on path")
+        + faults + ("left the path" if stop is not None else "stayed on path")
     )
 
 

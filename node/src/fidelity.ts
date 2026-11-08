@@ -1,3 +1,5 @@
+import { FaultReport, ReplayFault } from "./faults";
+
 /** How a replayed call was bound to the recording. */
 export type ReplayBindingKind =
   /** Served the recorded step with the same name and an identical input. */
@@ -5,7 +7,9 @@ export type ReplayBindingKind =
   /** No recorded step with that name had an identical input; served the next unused one in recorded order. */
   | "diverged"
   /** A model step that ran for real in a live replay (`live_model_steps`). */
-  | "live";
+  | "live"
+  /** Served an injected fault (`ReplayOptions.faults`) instead of running or using a recording. */
+  | "faulted";
 
 /** One replayed call and the recorded step bound to it. `recorded_index` is null for a live model call beyond the ones recorded. */
 export interface ReplayBinding {
@@ -94,10 +98,15 @@ export class ReplayFidelity {
   private readonly _bindings: ReplayBinding[] = [];
   private _unused: UnusedRecording[];
   private _stop: ReplayStop | null = null;
+  private readonly _faults: ReplayFault[];
+  private readonly _fired: number[];
+  private _firstFired: ReplayFault | null = null;
 
   /** @internal */
-  constructor(recorded: UnusedRecording[]) {
+  constructor(recorded: UnusedRecording[], faults: ReplayFault[] = []) {
     this._unused = [...recorded];
+    this._faults = [...faults];
+    this._fired = faults.map(() => 0);
   }
 
   /** Each replayed call, in call order. */
@@ -121,6 +130,37 @@ export class ReplayFidelity {
   /** Model steps that ran for real in a live replay. */
   get live(): number {
     return this._bindings.filter((b) => b.kind === "live").length;
+  }
+
+  /** Calls served an injected fault. */
+  get faulted(): number {
+    return this._bindings.filter((b) => b.kind === "faulted").length;
+  }
+
+  /** Each fault in `ReplayOptions.faults` and how many times it fired, in declared order. */
+  get faults(): FaultReport[] {
+    return this._faults.map((fault, i) => ({ fault, fired: this._fired[i], triggered: this._fired[i] > 0 }));
+  }
+
+  /** @internal The first fault that fired, or null while none has. */
+  get firstFired(): ReplayFault | null {
+    return this._firstFired;
+  }
+
+  /** @internal */
+  get declaredFaults(): readonly ReplayFault[] {
+    return this._faults;
+  }
+
+  /** @internal */
+  firedCount(faultIndex: number): number {
+    return this._fired[faultIndex];
+  }
+
+  /** @internal */
+  fired(faultIndex: number): void {
+    this._fired[faultIndex]++;
+    this._firstFired ??= this._faults[faultIndex];
   }
 
   /** No call diverged and every recorded step was called. Live calls don't count against it. */
@@ -151,7 +191,29 @@ export class ReplayFidelity {
    * agent threw, since the exception already explains the rest.
    */
   failure(traceId: string, liveModelSteps: boolean): string | null {
-    return liveModelSteps ? this.noLiveStepFailure(traceId) : this.unusedFailure(traceId);
+    if (liveModelSteps) return this.noLiveStepFailure(traceId);
+    return this.unusedRecordingsExpected ? null : this.unusedFailure(traceId);
+  }
+
+  /**
+   * A fault that fails every call fired, so the agent took its fallback path and the rest of the recording may
+   * legitimately go unused. A fault limited with `times(n)` is expected to rejoin the recording.
+   */
+  private get unusedRecordingsExpected(): boolean {
+    return this._faults.some((f, i) => f.count === null && this._fired[i] > 0);
+  }
+
+  /** @internal One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing. */
+  unfiredFaultFailures(callsOf: (stepName: string) => number): string[] {
+    return this._faults
+      .filter((_, i) => this._fired[i] === 0)
+      .map((f) => {
+        const calls = callsOf(f.step_name);
+        const why = calls === 0
+          ? `the agent never called '${f.step_name}'`
+          : `none of the ${calls} call(s) of '${f.step_name}' matched it`;
+        return `Fault not triggered: ${f.description} never fired: ${why}. The failure path it was meant to test did not run.`;
+      });
   }
 
   /** @internal The failure for recorded steps that were never called, or null when every recording was used. */

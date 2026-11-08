@@ -143,6 +143,18 @@ print("Passed" if replay.passed else replay.failures)
 
 Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `replay.fidelity`. A step with no recording raises instead of calling live, and a recorded step the agent never calls fails the replay.
 
+To test failure paths, add faults: replay serves a timeout, an HTTP error, a rate limit, a malformed output or your own exception in place of a step's recorded output, so retries, fallbacks and guards run.
+
+```python
+replay = sdk.replay(trace, my_agent, ReplayOptions(
+    mock_llm_responses=True,
+    faults=[ReplayFault.timeout("search_flights").times(1)],  # fail once, then serve the recording
+    assertions=[TraceAssert.max_attempts("search_flights", 2)],
+))
+```
+
+A fault that never fires fails the replay, and `replay.faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive.
+
 Store a known-good run — every step with its input and output — and detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered:
 
 ```python
@@ -203,13 +215,14 @@ output = asyncio.run(sdk.run_async("my-agent", my_agent, input="test input"))
 
 | Assertion | Description |
 |---|---|
-| `no_errors()` | All steps must succeed |
+| `no_errors()` | All steps must succeed (injected faults aside) |
 | `max_steps(n)` | Total step count must not exceed `n` |
 | `step_exists(name)` | A step with this name must appear |
 | `max_cost(usd)` | Total cost must not exceed `usd` |
 | `max_duration(ms)` | Total step duration must not exceed `ms` |
 | `output_contains(text)` | At least one step output must contain `text` |
 | `tool_called(name)` | A tool step with this name must appear |
+| `max_attempts(name, n)` | At most `n` calls of the step after its first failure (an error or an injected fault) |
 
 Custom assertions implement `async ITraceAssertion.evaluate_async(ctx) -> Optional[str]` — return `None` to pass or an error string to fail.
 
