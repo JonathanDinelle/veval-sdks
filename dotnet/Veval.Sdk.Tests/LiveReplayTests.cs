@@ -241,7 +241,7 @@ public class LiveReplayTests
             .And.Contain("re-record, or replay mocked to test this change");
         toolsRun.Should().BeEmpty("no tool runs for real in a live replay, and nothing runs after the stop");
         result.ReplayedContext!.Steps.Select(s => s.Name).Should().Equal("plan", "narrate", "fill");
-        result.ReplayedContext.Steps.Last().Status.Should().Be("error");
+        result.ReplayedContext.Steps.Last().Status.Should().Be("inconclusive");
         result.Status.Should().Be("inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
         result.Summary.Should().Be("inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path");
     }

@@ -185,7 +185,7 @@ test("live replay stops where a diverged tool step leaves the recording", async 
   assert.deepEqual(toolsRun, [], "no tool runs for real in a live replay, and nothing runs after the stop");
   const steps = result.replayed_context!.steps;
   assert.deepEqual(steps.map((s) => s.name), ["plan", "narrate", "fill"]);
-  assert.equal(steps.at(-1)!.status, "error");
+  assert.equal(steps.at(-1)!.status, "inconclusive");
   assert.equal(result.status, "inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
   assert.equal(result.summary, "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path");
 });

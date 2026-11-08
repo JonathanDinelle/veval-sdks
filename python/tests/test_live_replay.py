@@ -221,7 +221,7 @@ def test_live_replay_stops_where_a_diverged_tool_step_leaves_the_recording():
     assert tools_run == []  # no tool runs for real in a live replay, and nothing runs after the stop
     steps = result.replayed_context.steps
     assert [s.name for s in steps] == ["plan", "narrate", "fill"]
-    assert steps[-1].status == "error"
+    assert steps[-1].status == "inconclusive"
     assert result.status == "inconclusive"  # neither passed nor failed, so it mustn't raise the error alert
     assert result.summary == "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged but served, 1 live, left the path"
 

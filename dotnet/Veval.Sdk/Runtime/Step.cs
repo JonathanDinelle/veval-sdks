@@ -44,6 +44,15 @@ public class Step
         DurationMs = (int)(CompletedAt.Value - StartedAt).TotalMilliseconds;
     }
 
+    /// <summary>A live replay stopped at this step (<see cref="ReplayStop"/>): neither a success nor an error.</summary>
+    internal void Stopped(string message)
+    {
+        Error = message;
+        Status = "inconclusive";
+        CompletedAt = DateTime.UtcNow;
+        DurationMs = (int)(CompletedAt.Value - StartedAt).TotalMilliseconds;
+    }
+
     public Step CreateStep(string name)
     {
         var child = new Step(name, StepId);

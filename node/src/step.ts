@@ -5,7 +5,8 @@ export class Step {
   type: string = "custom";
   input: unknown = null;
   output: unknown = null;
-  status: "running" | "success" | "error" = "running";
+  /** "inconclusive": a live replay stopped at this step (`ReplayStop`), so it neither succeeded nor failed. */
+  status: "running" | "success" | "error" | "inconclusive" = "running";
   error: string | null = null;
   readonly startedAt: Date = new Date();
   completedAt: Date | null = null;
@@ -36,6 +37,14 @@ export class Step {
   fail(error: string): void {
     this.error = error;
     this.status = "error";
+    this.completedAt = new Date();
+    this.durationMs = this.completedAt.getTime() - this.startedAt.getTime();
+  }
+
+  /** @internal A live replay stopped at this step: neither a success nor an error. */
+  stopped(message: string): void {
+    this.error = message;
+    this.status = "inconclusive";
     this.completedAt = new Date();
     this.durationMs = this.completedAt.getTime() - this.startedAt.getTime();
   }
