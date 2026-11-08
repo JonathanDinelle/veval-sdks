@@ -13,7 +13,8 @@ import {
 } from "./snapshots";
 import { ITraceAssertion, JudgeResult, JudgeOptions } from "./assertions";
 import { ReplayStepRule } from "./fidelity";
-import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult } from "./scenarios";
+import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult, maxInconclusiveRate } from "./scenarios";
+import { replaySummary } from "./summary";
 import { VevalHttpClient } from "./http-client";
 import { ScenarioReport } from "./scenario-report";
 
@@ -181,7 +182,7 @@ export class VevalSdk {
     // A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
     // after the stop (caught it, threw something else) is a consequence of the stop, not a finding.
     if (stop) {
-      status = "error";
+      status = "inconclusive";
       error = stop.message;
     } else {
       if (error) failures.push(`Replay threw exception: ${error}`);
@@ -213,6 +214,7 @@ export class VevalSdk {
       completed_at: completedAt.toISOString(),
       status,
       error,
+      summary: replaySummary(failures, stop, ctx.replayFidelity),
     };
   }
 
@@ -223,6 +225,7 @@ export class VevalSdk {
     items?: ScenarioItem[],
     options?: ScenarioOptions
   ): Promise<ScenarioRunResult> {
+    const maxRate = maxInconclusiveRate(options);
     const rawItems = items ?? (await this.http.getScenarioItemsAsync(scenarioName)) as ScenarioItem[];
     const results: ItemRunResult[] = [];
     const report = new ScenarioReport(this.http, scenarioName);
@@ -241,6 +244,7 @@ export class VevalSdk {
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
           itemResult.inconclusive = replayResult.inconclusive;
+          itemResult.fidelity = replayResult.fidelity ?? null;
           itemResult.context = replayResult.replayed_context ?? undefined;
 
           if (replayResult.replayed_context) {
@@ -272,7 +276,7 @@ export class VevalSdk {
       results.push(itemResult);
     }
 
-    return report.completeAsync(results, "synthetic");
+    return report.completeAsync(results, "synthetic", maxRate);
   }
 
   /** Runs one synthetic scenario item, sends its trace through the report, and resolves to its context. */

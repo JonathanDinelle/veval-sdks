@@ -4,7 +4,7 @@ import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
 import { ITraceAssertion, JudgeResult } from "./assertions";
-import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult } from "./scenarios";
+import { ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult, maxInconclusiveRate } from "./scenarios";
 import { ScenarioReport } from "./scenario-report";
 
 export class VevalTestSdk extends VevalSdk {
@@ -131,6 +131,7 @@ export class VevalTestSdk extends VevalSdk {
     items?: ScenarioItem[],
     options?: ScenarioOptions
   ): Promise<ScenarioRunResult> {
+    const maxRate = maxInconclusiveRate(options);
     const resolvedItems = items ?? [];
     const results: ItemRunResult[] = [];
     const report = new ScenarioReport(this.http, scenarioName);
@@ -151,6 +152,7 @@ export class VevalTestSdk extends VevalSdk {
           itemResult.failures.push(...replayResult.failures);
           itemResult.passed = replayResult.passed;
           itemResult.inconclusive = replayResult.inconclusive;
+          itemResult.fidelity = replayResult.fidelity ?? null;
           itemResult.context = replayResult.replayed_context ?? undefined;
 
           if (replayResult.replayed_context) {
@@ -189,6 +191,6 @@ export class VevalTestSdk extends VevalSdk {
       results.push(itemResult);
     }
 
-    return report.completeAsync(results, "item");
+    return report.completeAsync(results, "item", maxRate);
   }
 }

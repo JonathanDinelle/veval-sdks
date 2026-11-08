@@ -14,4 +14,19 @@ public class ScenarioOptions
     /// entry for the same step replaces the scenario's.
     /// </summary>
     public Dictionary<string, ReplayStepRule> StepRules { get; set; } = new();
+
+    /// <summary>
+    /// The largest share of inconclusive items (0 to 1) a passing run may have. Defaults to 0: any inconclusive item
+    /// fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
+    /// some items needing a real run, e.g. 0.1 for one in ten.
+    /// </summary>
+    public double MaxInconclusiveRate
+    {
+        get => _maxInconclusiveRate;
+        set => _maxInconclusiveRate = value is >= 0 and <= 1
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(MaxInconclusiveRate), value, "MaxInconclusiveRate is a share from 0 to 1.");
+    }
+
+    private double _maxInconclusiveRate;
 }

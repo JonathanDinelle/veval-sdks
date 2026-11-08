@@ -156,7 +156,7 @@ public class VevalTestSdk : IVevalSdk
         ScenarioItem[]? items = null,
         ScenarioOptions? options = null)
     {
-        var scenarioResult = new ScenarioRunResult();
+        var scenarioResult = new ScenarioRunResult { MaxInconclusiveRate = options?.MaxInconclusiveRate ?? 0 };
         var report = new ScenarioReport(_reportingClient, scenarioName);
         var resolvedItems = items ?? Array.Empty<ScenarioItem>();
 
@@ -181,6 +181,7 @@ public class VevalTestSdk : IVevalSdk
                             effectiveAssertions));
                     itemResult.Failures.AddRange(replayResult.Failures);
                     itemResult.Inconclusive = replayResult.Inconclusive;
+                    itemResult.Fidelity = replayResult.Fidelity;
                     itemResult.Context = replayResult.ReplayedContext;
 
                     var replayCtx = replayResult.ReplayedContext!;

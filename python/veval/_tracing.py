@@ -126,6 +126,7 @@ class ReplayResult:
     output: Any = None
     started_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
+    # The replay trace's status: "success", "error" (the agent raised), or "inconclusive" (the replay stopped).
     status: str = "success"
     error: Optional[str] = None
     # How the replay differed from its recording; set when compare_with_recording is on.
@@ -147,3 +148,9 @@ class ReplayResult:
     def passed(self) -> bool:
         """True only when the replay passed; False when it failed or was inconclusive."""
         return self.outcome == "passed"
+
+    @property
+    def summary(self) -> str:
+        """One line, e.g. "passed — 40/64 recorded steps used, 3 diverged, 12 live, stayed on path"."""
+        from ._summary import replay_summary
+        return replay_summary(self.failures, self.inconclusive, self.fidelity)

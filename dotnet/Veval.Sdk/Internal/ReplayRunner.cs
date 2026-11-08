@@ -35,7 +35,7 @@ internal static class ReplayRunner
         // after the stop (caught it, threw something else) is a consequence of the stop, not a finding.
         if (ctx.ReplayFidelity?.Stop is { } stop)
         {
-            status = "error";
+            status = "inconclusive";
             error = stop.Message;
         }
         else

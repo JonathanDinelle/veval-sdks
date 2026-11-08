@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ReplayOptions, ReplayStoppedError, StepType, TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { ItemRunResult, ReplayOptions, ReplayStoppedError, StepType, TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { ScenarioReport } from "../src/scenario-report";
 import { recorded, sdk, testSdk } from "./helpers";
 
 // Live replay: model steps run for real, every other step is served from the recording.
@@ -185,7 +186,8 @@ test("live replay stops where a diverged tool step leaves the recording", async 
   const steps = result.replayed_context!.steps;
   assert.deepEqual(steps.map((s) => s.name), ["plan", "narrate", "fill"]);
   assert.equal(steps.at(-1)!.status, "error");
-  assert.equal(result.status, "error");
+  assert.equal(result.status, "inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
+  assert.equal(result.summary, "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path");
 });
 
 test("live replay passes when only a name-matched narration step changes", async () => {
@@ -282,6 +284,75 @@ test("scenario: an inconclusive item is counted apart, and an item rule replaces
   assert.equal(result.results[0].inconclusive!.step_name, "fill");
   assert.equal(result.results[0].passed, false);
   assert.equal(result.results[1].passed, true, result.results[1].failures.join("; "));
+});
+
+const passedItem = (): ItemRunResult => ({ item: { assertions: [] }, passed: true, failures: [] });
+const inconclusiveItem = (): ItemRunResult => ({
+  item: { assertions: [] }, passed: false, failures: [],
+  inconclusive: { step: 3, step_name: "fill", reason: "diverged", recorded_input: null, actual_input: null, message: "stopped" },
+});
+
+test("scenario run fails on any inconclusive item by default", () => {
+  const result = ScenarioReport.result([passedItem(), passedItem(), passedItem(), inconclusiveItem()]);
+
+  assert.equal(result.passed, false, "a change that sends items off their recorded path mustn't look green");
+  assert.equal(result.inconclusive_rate, 0.25);
+  assert.equal(result.summary, "failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)");
+});
+
+test("scenario run passes when the inconclusive rate is within the threshold", () => {
+  const result = ScenarioReport.result([passedItem(), passedItem(), passedItem(), inconclusiveItem()], 0.25);
+
+  assert.equal(result.passed, true);
+  assert.equal(result.summary, "passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)");
+});
+
+test("scenario run: a failed item fails the run whatever the threshold", () => {
+  const failed: ItemRunResult = { item: { assertions: [] }, passed: false, failures: ["OutputContains failed"] };
+
+  assert.equal(ScenarioReport.result([passedItem(), failed], 1).passed, false);
+});
+
+test("scenario run rejects a threshold outside 0 to 1", async () => {
+  for (const rate of [-0.1, 1.5, NaN])
+    await assert.rejects(sdk().runScenarioAsync("s", async () => "x", [], [], { max_inconclusive_rate: rate }), RangeError);
+});
+
+test("scenario run reports how many replays stayed on path", async () => {
+  const onPath = await liveReplay(browserAgent());
+  const offPath = await liveReplay(browserAgent({ date: "2026-11-03" }));
+  const result = ScenarioReport.result([
+    { ...passedItem(), fidelity: onPath.fidelity },
+    { ...inconclusiveItem(), fidelity: offPath.fidelity, inconclusive: offPath.inconclusive },
+    passedItem(),
+  ]);
+
+  assert.equal(result.stayed_on_path_rate, 0.5, "the synthetic item wasn't replayed, so it doesn't count");
+  assert.ok(result.summary.endsWith(", 1/2 replays stayed on path"), result.summary);
+  assert.equal(onPath.summary, "passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path");
+});
+
+test("scenario run payload posts a third outcome and the stop", () => {
+  const stop = { step: 3, step_name: "fill", reason: "diverged" as const, recorded_input: { value: "a" }, actual_input: { value: "b" }, message: "stopped" };
+  const result = ScenarioReport.result([
+    { ...passedItem(), item: { name: "ok", assertions: [] } },
+    { item: { name: "bad", assertions: [] }, passed: false, failures: ["OutputContains failed"] },
+    { item: { name: "off", assertions: [] }, passed: false, failures: [], inconclusive: stop },
+  ]);
+
+  const json = JSON.parse(JSON.stringify(ScenarioReport.runPayload(result, "synthetic")));
+
+  assert.equal(json.fail_count, 1);
+  assert.equal(json.inconclusive_count, 1);
+  assert.equal(json.max_inconclusive_rate, 0);
+  assert.ok(json.summary.startsWith("failed — 1 passed, 1 failed, 1 inconclusive"), json.summary);
+  assert.deepEqual(json.results.map((i: { outcome: string }) => i.outcome), ["passed", "failed", "inconclusive"]);
+  const off = json.results[2];
+  assert.equal(off.passed, false);
+  assert.deepEqual(off.failures, []);
+  assert.equal(off.summary, "inconclusive at step 3 'fill'");
+  assert.deepEqual(off.inconclusive, stop);
+  assert.equal(json.results[0].inconclusive, null);
 });
 
 // VEV-37: the call site can say a step is a model call before it runs.

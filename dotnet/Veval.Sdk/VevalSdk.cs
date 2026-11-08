@@ -98,7 +98,7 @@ public class VevalSdk : IVevalSdk
             .Select(dto => new ScenarioItem { Name = dto.Name, TraceId = dto.TraceId, Input = dto.Input })
             .ToArray();
 
-        var scenarioResult = new ScenarioRunResult();
+        var scenarioResult = new ScenarioRunResult { MaxInconclusiveRate = options?.MaxInconclusiveRate ?? 0 };
         var report = new ScenarioReport(_client, scenarioName);
 
         foreach (var item in resolvedItems)
@@ -118,6 +118,7 @@ public class VevalSdk : IVevalSdk
                     var replayResult = await ReplayAsync(trace, agent, ScenarioReplayOptions(item, options ?? new ScenarioOptions(), effectiveAssertions));
                     itemResult.Failures.AddRange(replayResult.Failures);
                     itemResult.Inconclusive = replayResult.Inconclusive;
+                    itemResult.Fidelity = replayResult.Fidelity;
                     itemResult.Context = replayResult.ReplayedContext;
 
                     // Record the replay as a trace so it appears in the dashboard

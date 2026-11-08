@@ -140,7 +140,7 @@ class VevalTestSdk(VevalSdk):
     ) -> ScenarioRunResult:
         options = _scenario_options(options)
         resolved_items = items or []
-        scenario_result = ScenarioRunResult()
+        scenario_result = ScenarioRunResult(max_inconclusive_rate=options.max_inconclusive_rate)
         report = ScenarioReport(self._client, scenario_name)
 
         for item in resolved_items:
@@ -162,6 +162,7 @@ class VevalTestSdk(VevalSdk):
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.inconclusive = replay_result.inconclusive
+                    item_result.fidelity = replay_result.fidelity
                     item_result.context = replay_result.replayed_context
 
                     if replay_result.replayed_context:

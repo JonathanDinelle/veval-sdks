@@ -9,8 +9,9 @@ import pytest
 os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never reach the real API
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from veval._scenario_report import _run_payload  # noqa: E402
 from veval import (  # noqa: E402
-    ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
+    ItemRunResult, ReplayStop, ScenarioRunResult, ReplayOptions, ReplayStepRule, ReplayStoppedError, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
     TraceAssert, TraceData, VevalExecutionContext, VevalOptions, VevalSdk, VevalTestSdk,
 )
 
@@ -221,7 +222,8 @@ def test_live_replay_stops_where_a_diverged_tool_step_leaves_the_recording():
     steps = result.replayed_context.steps
     assert [s.name for s in steps] == ["plan", "narrate", "fill"]
     assert steps[-1].status == "error"
-    assert result.status == "error"
+    assert result.status == "inconclusive"  # neither passed nor failed, so it mustn't raise the error alert
+    assert result.summary == "inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path"
 
 
 def test_live_replay_passes_when_only_a_name_matched_narration_step_changes():
@@ -355,6 +357,82 @@ def test_scenario_counts_an_inconclusive_item_apart_and_an_item_rule_replaces_th
     assert result.results[0].inconclusive.step_name == "fill"
     assert not result.results[0].passed
     assert result.results[1].passed, result.results[1].failures
+
+
+def passed_item():
+    return ItemRunResult(item=ScenarioItem())
+
+
+def inconclusive_item():
+    return ItemRunResult(item=ScenarioItem(), inconclusive=ReplayStop(3, "fill", "diverged", None, None, "stopped"))
+
+
+def test_scenario_run_fails_on_any_inconclusive_item_by_default():
+    result = ScenarioRunResult(results=[passed_item(), passed_item(), passed_item(), inconclusive_item()])
+
+    assert not result.passed  # a change that sends items off their recorded path mustn't look green
+    assert result.inconclusive_rate == 0.25
+    assert result.summary == "failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)"
+
+
+def test_scenario_run_passes_when_the_inconclusive_rate_is_within_the_threshold():
+    result = ScenarioRunResult(
+        max_inconclusive_rate=0.25, results=[passed_item(), passed_item(), passed_item(), inconclusive_item()])
+
+    assert result.passed
+    assert result.summary == "passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)"
+
+
+def test_scenario_run_a_failed_item_fails_the_run_whatever_the_threshold():
+    failed = ItemRunResult(item=ScenarioItem(), failures=["OutputContains failed"])
+
+    assert not ScenarioRunResult(max_inconclusive_rate=1, results=[passed_item(), failed]).passed
+
+
+@pytest.mark.parametrize("rate", [-0.1, 1.5, float("nan")])
+def test_scenario_options_reject_a_threshold_outside_zero_to_one(rate):
+    with pytest.raises(ValueError):
+        ScenarioOptions(max_inconclusive_rate=rate)
+
+
+def test_scenario_run_reports_how_many_replays_stayed_on_path():
+    on_path = live_replay(browser_agent())
+    off_path = live_replay(browser_agent(date="2026-11-03"))
+    result = ScenarioRunResult(results=[
+        ItemRunResult(item=ScenarioItem(), fidelity=on_path.fidelity),
+        ItemRunResult(item=ScenarioItem(), fidelity=off_path.fidelity, inconclusive=off_path.inconclusive),
+        passed_item(),
+    ])
+
+    assert result.stayed_on_path_rate == 0.5  # the synthetic item wasn't replayed, so it doesn't count
+    assert result.summary.endswith(", 1/2 replays stayed on path")
+    assert on_path.summary == "passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path"
+
+
+def test_scenario_run_payload_posts_a_third_outcome_and_the_stop():
+    stop = ReplayStop(3, "fill", "diverged", {"value": "a"}, {"value": "b"}, "stopped")
+    result = ScenarioRunResult(results=[
+        ItemRunResult(item=ScenarioItem(name="ok")),
+        ItemRunResult(item=ScenarioItem(name="bad"), failures=["OutputContains failed"]),
+        ItemRunResult(item=ScenarioItem(name="off"), inconclusive=stop),
+    ])
+
+    payload = _run_payload(result, "synthetic")
+
+    assert payload["fail_count"] == 1
+    assert payload["inconclusive_count"] == 1
+    assert payload["max_inconclusive_rate"] == 0
+    assert payload["summary"].startswith("failed — 1 passed, 1 failed, 1 inconclusive")
+    assert [i["outcome"] for i in payload["results"]] == ["passed", "failed", "inconclusive"]
+    off = payload["results"][2]
+    assert off["passed"] is False
+    assert off["failures"] == []
+    assert off["summary"] == "inconclusive at step 3 'fill'"
+    assert off["inconclusive"] == {
+        "step": 3, "step_name": "fill", "reason": "diverged",
+        "recorded_input": {"value": "a"}, "actual_input": {"value": "b"}, "message": "stopped",
+    }
+    assert payload["results"][0]["inconclusive"] is None
 
 
 # VEV-37: the call site can say a step is a model call before it runs.

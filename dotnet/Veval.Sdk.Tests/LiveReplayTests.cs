@@ -242,7 +242,8 @@ public class LiveReplayTests
         toolsRun.Should().BeEmpty("no tool runs for real in a live replay, and nothing runs after the stop");
         result.ReplayedContext!.Steps.Select(s => s.Name).Should().Equal("plan", "narrate", "fill");
         result.ReplayedContext.Steps.Last().Status.Should().Be("error");
-        result.Status.Should().Be("error");
+        result.Status.Should().Be("inconclusive", "the replay trace neither passed nor failed, so it mustn't raise the error alert");
+        result.Summary.Should().Be("inconclusive at step 3 'fill' — 2/5 recorded steps used, 0 diverged, 1 live, left the path");
     }
 
     [Fact]
@@ -366,6 +367,110 @@ public class LiveReplayTests
         result.Passed.Should().BeFalse();
         (result.PassCount, result.FailCount, result.InconclusiveCount).Should().Be((1, 1, 1));
         result.Results[2].Passed.Should().BeFalse();
+    }
+
+    private static ItemRunResult PassedItem() => new() { Item = new ScenarioItem() };
+
+    private static ItemRunResult InconclusiveItem() =>
+        new() { Item = new ScenarioItem(), Inconclusive = new ReplayStop(3, "fill", ReplayStopReason.Diverged, null, null, "stopped") };
+
+    [Fact]
+    public void ScenarioRun_FailsOnAnyInconclusiveItemByDefault()
+    {
+        var result = new ScenarioRunResult { Results = [PassedItem(), PassedItem(), PassedItem(), InconclusiveItem()] };
+
+        result.Passed.Should().BeFalse("a change that sends items off their recorded path mustn't look green");
+        result.InconclusiveRate.Should().Be(0.25);
+        result.Summary.Should().Be("failed — 3 passed, 0 failed, 1 inconclusive (25% > 0% allowed)");
+    }
+
+    [Fact]
+    public void ScenarioRun_PassesWhenTheInconclusiveRateIsWithinTheThreshold()
+    {
+        var result = new ScenarioRunResult
+        {
+            MaxInconclusiveRate = 0.25,
+            Results = [PassedItem(), PassedItem(), PassedItem(), InconclusiveItem()],
+        };
+
+        result.Passed.Should().BeTrue();
+        result.Summary.Should().Be("passed — 3 passed, 0 failed, 1 inconclusive (25%, within 25% allowed)");
+    }
+
+    [Fact]
+    public void ScenarioRun_AFailedItemFailsTheRunWhateverTheThreshold()
+    {
+        var failed = new ItemRunResult { Item = new ScenarioItem(), Failures = ["OutputContains failed"] };
+        var result = new ScenarioRunResult { MaxInconclusiveRate = 1, Results = [PassedItem(), failed] };
+
+        result.Passed.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(1.5)]
+    [InlineData(double.NaN)]
+    public void ScenarioOptions_RejectsAThresholdOutsideZeroToOne(double rate)
+    {
+        var act = () => new ScenarioOptions { MaxInconclusiveRate = rate };
+
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task ScenarioRun_ReportsHowManyReplaysStayedOnPath()
+    {
+        var onPath = await LiveReplay(BrowserAgent());
+        var offPath = await LiveReplay(BrowserAgent(date: "2026-11-03"));
+        var result = new ScenarioRunResult
+        {
+            Results =
+            [
+                new ItemRunResult { Item = new ScenarioItem(), Fidelity = onPath.Fidelity },
+                new ItemRunResult { Item = new ScenarioItem(), Fidelity = offPath.Fidelity, Inconclusive = offPath.Inconclusive },
+                PassedItem(),
+            ],
+        };
+
+        result.StayedOnPathRate.Should().Be(0.5, "the synthetic item wasn't replayed, so it doesn't count");
+        result.Summary.Should().EndWith(", 1/2 replays stayed on path");
+        onPath.Summary.Should().Be("passed — 5/5 recorded steps used, 0 diverged, 2 live, stayed on path");
+    }
+
+    [Fact]
+    public void ScenarioRunPayload_PostsAThirdOutcomeAndTheStop()
+    {
+        var stop = new ReplayStop(3, "fill", ReplayStopReason.Diverged, new { value = "a" }, new { value = "b" }, "stopped");
+        var result = new ScenarioRunResult
+        {
+            Results =
+            [
+                new ItemRunResult { Item = new ScenarioItem { Name = "ok" } },
+                new ItemRunResult { Item = new ScenarioItem { Name = "bad" }, Failures = ["OutputContains failed"] },
+                new ItemRunResult { Item = new ScenarioItem { Name = "off" }, Inconclusive = stop },
+            ],
+        };
+
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(Internal.ScenarioReport.RunPayload(result, "synthetic"));
+
+        json.GetProperty("fail_count").GetInt32().Should().Be(1);
+        json.GetProperty("inconclusive_count").GetInt32().Should().Be(1);
+        json.GetProperty("max_inconclusive_rate").GetDouble().Should().Be(0);
+        json.GetProperty("summary").GetString().Should().StartWith("failed — 1 passed, 1 failed, 1 inconclusive");
+        var items = json.GetProperty("results").EnumerateArray().ToList();
+        items.Select(i => i.GetProperty("outcome").GetString()).Should().Equal("passed", "failed", "inconclusive");
+        var off = items[2];
+        off.GetProperty("passed").GetBoolean().Should().BeFalse();
+        off.GetProperty("failures").GetArrayLength().Should().Be(0);
+        off.GetProperty("summary").GetString().Should().Be("inconclusive at step 3 'fill'");
+        var posted = off.GetProperty("inconclusive");
+        posted.GetProperty("step").GetInt32().Should().Be(3);
+        posted.GetProperty("step_name").GetString().Should().Be("fill");
+        posted.GetProperty("reason").GetString().Should().Be("diverged");
+        posted.GetProperty("recorded_input").GetProperty("value").GetString().Should().Be("a");
+        posted.GetProperty("actual_input").GetProperty("value").GetString().Should().Be("b");
+        posted.GetProperty("message").GetString().Should().Be("stopped");
+        items[0].GetProperty("inconclusive").ValueKind.Should().Be(System.Text.Json.JsonValueKind.Null);
     }
 
     [Fact]
