@@ -25,6 +25,7 @@ public class ReplayResult
     public object? Output { get; set; }
     public DateTime StartedAt { get; set; }
     public DateTime CompletedAt { get; set; }
+    /// <summary>The replay trace's status: "success", "error" (the agent threw), or "inconclusive" (the replay stopped).</summary>
     public string Status { get; set; } = "success";
     public string? Error { get; set; }
 
@@ -36,4 +37,7 @@ public class ReplayResult
     /// (<see cref="ReplayOptions.MockLlmResponses"/> or <see cref="ReplayOptions.LiveModelSteps"/>).
     /// </summary>
     public ReplayFidelity? Fidelity { get; set; }
+
+    /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path</c>.</summary>
+    public string Summary => Internal.ResultSummary.ForReplay(Failures, Inconclusive, Fidelity);
 }

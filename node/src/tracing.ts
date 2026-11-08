@@ -89,8 +89,11 @@ export interface ReplayResult {
   output: unknown;
   started_at: string;
   completed_at: string;
+  /** The replay trace's status: "success", "error" (the agent threw), or "inconclusive" (the replay stopped). */
   status: string;
   error: string | null;
+  /** One line, e.g. `passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path`. */
+  summary: string;
   /** How the replay differed from its recording; set when `compare_with_recording` is on. */
   recording_diff?: SnapshotDiff | null;
   /** How each call was bound to the recording; set for mocked and live replays (`mock_llm_responses` or `live_model_steps`). */

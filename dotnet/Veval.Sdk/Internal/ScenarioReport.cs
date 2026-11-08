@@ -26,25 +26,51 @@ internal sealed class ScenarioReport
     /// <param name="unnamedItem">The name posted for an item with neither a Name nor a TraceId.</param>
     public async Task CompleteAsync(ScenarioRunResult result, string unnamedItem)
     {
-        await _client.PostScenarioRunAsync(_scenarioName, new
-        {
-            passed = result.Passed,
-            pass_count = result.PassCount,
-            // The dashboard has no inconclusive state yet (VEV-39): an inconclusive item is posted as not passed,
-            // with its stop as the reason.
-            fail_count = result.FailCount + result.InconclusiveCount,
-            results = result.Results.Select(r => new
-            {
-                name = r.Item.Name ?? r.Item.TraceId ?? unnamedItem,
-                passed = r.Passed,
-                failures = r.Inconclusive is { } stop ? new List<string> { stop.Message } : r.Failures,
-                judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
-            }),
-        });
+        await _client.PostScenarioRunAsync(_scenarioName, RunPayload(result, unnamedItem));
 
         if (_undelivered > 0 && _client.ThrowOnSendFailure)
             throw new VevalSendException(
                 $"Veval: {_undelivered} trace(s) from scenario '{_scenarioName}' could not be stored; see the warnings above",
                 null);
     }
+
+    /// <summary>The run as posted: snake_case keys, a third item outcome, and the stop of each inconclusive item.</summary>
+    internal static object RunPayload(ScenarioRunResult result, string unnamedItem) => new
+    {
+        passed = result.Passed,
+        pass_count = result.PassCount,
+        fail_count = result.FailCount,
+        inconclusive_count = result.InconclusiveCount,
+        max_inconclusive_rate = result.MaxInconclusiveRate,
+        summary = result.Summary,
+        results = result.Results.Select(r => new
+        {
+            name = r.Item.Name ?? r.Item.TraceId ?? unnamedItem,
+            // Kept for readers that predate outcome: true only when the item passed.
+            passed = r.Passed,
+            outcome = OutcomeName(r.Outcome),
+            replayed = r.Replayed,
+            inconclusive = r.Inconclusive is { } stop
+                ? new
+                {
+                    step = stop.Step,
+                    step_name = stop.StepName,
+                    reason = stop.Reason == ReplayStopReason.Diverged ? "diverged" : "no_recording",
+                    recorded_input = stop.RecordedInput,
+                    actual_input = stop.ActualInput,
+                    message = stop.Message,
+                }
+                : null,
+            summary = r.Summary,
+            failures = r.Failures,
+            judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
+        }),
+    };
+
+    private static string OutcomeName(ReplayOutcome outcome) => outcome switch
+    {
+        ReplayOutcome.Passed => "passed",
+        ReplayOutcome.Failed => "failed",
+        _ => "inconclusive",
+    };
 }

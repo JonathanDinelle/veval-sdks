@@ -259,7 +259,7 @@ public class VevalExecutionContext
 
         var step = new Step(name, null) { Input = input, Type = recordedType ?? "custom" };
         step.Metadata["_source"] = "replay";
-        step.Fail(message);
+        step.Stopped(message);
         _steps.Add(step);
         return new ReplayStoppedException(stop);
     }

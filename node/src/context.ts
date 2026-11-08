@@ -292,7 +292,7 @@ export class VevalExecutionContext {
     s.input = input;
     s.type = recordedType ?? "custom";
     s.metadata["_source"] = "replay";
-    s.fail(message);
+    s.stopped(message);
     this._steps.push(s);
     return new ReplayStoppedError(stop);
   }

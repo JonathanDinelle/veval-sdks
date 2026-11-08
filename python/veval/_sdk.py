@@ -13,7 +13,7 @@ from ._tracing import (
     ReplayOptions, ReplayResult,
 )
 from ._assertions import ITraceAssertion
-from ._scenarios import ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult
+from ._scenarios import ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult, _check_rate
 from ._fidelity import ReplayStepRule
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
@@ -251,7 +251,7 @@ class VevalSdk:
         else:
             resolved_items = items
 
-        scenario_result = ScenarioRunResult()
+        scenario_result = ScenarioRunResult(max_inconclusive_rate=options.max_inconclusive_rate)
         report = ScenarioReport(self._client, scenario_name)
 
         for item in resolved_items:
@@ -269,6 +269,7 @@ class VevalSdk:
                     )
                     item_result.failures.extend(replay_result.failures)
                     item_result.inconclusive = replay_result.inconclusive
+                    item_result.fidelity = replay_result.fidelity
                     item_result.context = replay_result.replayed_context
 
                     replay_ctx = replay_result.replayed_context
@@ -474,7 +475,7 @@ def _replay_result(
         output=output,
         started_at=started_at,
         completed_at=completed_at,
-        status="error" if error else "success",
+        status="inconclusive" if stop is not None else "error" if error else "success",
         error=error,
     )
 
@@ -504,6 +505,8 @@ def _scenario_options(options: Optional[ScenarioOptions]) -> ScenarioOptions:
             f"run_scenario_async options must be a ScenarioOptions, not {type(options).__name__}; "
             "for a fully mocked replay pass ScenarioOptions(mock_model_steps=True)"
         )
+    # Checked again: the field may have been set after construction.
+    _check_rate(options.max_inconclusive_rate)
     return options
 
 

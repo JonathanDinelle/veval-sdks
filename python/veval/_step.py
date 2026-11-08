@@ -41,6 +41,13 @@ class Step:
         self.completed_at = datetime.now(timezone.utc)
         self.duration_ms = int((self.completed_at - self.started_at).total_seconds() * 1000)
 
+    def _stopped(self, message: str) -> None:
+        """A live replay stopped at this step (ReplayStop): neither a success nor an error."""
+        self.error = message
+        self.status = "inconclusive"
+        self.completed_at = datetime.now(timezone.utc)
+        self.duration_ms = int((self.completed_at - self.started_at).total_seconds() * 1000)
+
     def create_step(self, name: str) -> Step:
         child = Step(name, self.step_id)
         self._children.append(child)

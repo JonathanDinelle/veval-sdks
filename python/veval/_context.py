@@ -299,7 +299,7 @@ class VevalExecutionContext:
         s.input = input
         s.type = recorded_type or "custom"
         s.metadata["_source"] = "replay"
-        s.fail(message)
+        s._stopped(message)
         self._steps.append(s)
         return ReplayStoppedError(stop)
 
