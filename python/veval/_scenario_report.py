@@ -38,6 +38,7 @@ def _run_payload(result: ScenarioRunResult, unnamed_item: str) -> dict[str, Any]
         "pass_count": result.pass_count,
         "fail_count": result.fail_count,
         "inconclusive_count": result.inconclusive_count,
+        "inconclusive_after_fault_count": result.inconclusive_after_fault_count,
         "max_inconclusive_rate": result.max_inconclusive_rate,
         "summary": result.summary,
         "results": [
@@ -56,6 +57,11 @@ def _run_payload(result: ScenarioRunResult, unnamed_item: str) -> dict[str, Any]
                     "message": r.inconclusive.message,
                 },
                 "summary": r.summary,
+                # Each injected fault and how many times it fired, so the run shows which items tested a failure path.
+                "faults": [
+                    {"description": f.fault.description, "step_name": f.fault.step_name, "fired": f.fired}
+                    for f in r.faults
+                ],
                 "failures": r.failures,
                 "judgments": r.context.judgments if r.context else [],
             }

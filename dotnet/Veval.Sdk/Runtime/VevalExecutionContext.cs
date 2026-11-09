@@ -89,12 +89,11 @@ public class VevalExecutionContext
             // After a fault, a mocked replay serves only calls that still match their recording: a fallback the
             // recording never called, or a model call whose prompt now carries the error, has no truthful output.
             if (!_liveModelSteps && _fidelity!.FirstFired != null && (recorded == null || !exact))
-                throw StopAt(name, recorded == null ? ReplayStopReason.NoRecording : ReplayStopReason.Diverged,
-                    recorded?.Data.Input, input, effectiveType);
+                throw StopAt(name, diverged: recorded != null, recorded?.Data.Input, input, effectiveType);
 
             if (recorded == null && !runLive && _strictMockMode)
             {
-                if (_liveModelSteps) throw StopAt(name, ReplayStopReason.NoRecording, null, input, effectiveType);
+                if (_liveModelSteps) throw StopAt(name, diverged: false, null, input, effectiveType);
                 throw new InvalidOperationException(
                     $"Replay mode: no mock output for step '{name}'. " +
                     $"Available steps: {AvailableSteps()}. " +
@@ -103,7 +102,7 @@ public class VevalExecutionContext
 
             // A live model handed a recording from another path would reason over a page it never reached.
             if (_liveModelSteps && !runLive && recorded != null && !exact && StopsOnDivergence(rule, effectiveType))
-                throw StopAt(name, ReplayStopReason.Diverged, recorded.Data.Input, input, effectiveType);
+                throw StopAt(name, diverged: true, recorded.Data.Input, input, effectiveType);
 
             if (recorded != null) recorded.Consumed = true;
 
@@ -195,7 +194,7 @@ public class VevalExecutionContext
         step.Metadata["_fault"] = fault.Description;
         _steps.Add(step);
 
-        if (fault.Kind != FaultKind.Malformed)
+        if (fault.Kind is not (FaultKind.Malformed or FaultKind.Returns))
         {
             var exception = fault.CreateException();
             step.Fail(exception.Message);
@@ -219,19 +218,38 @@ public class VevalExecutionContext
     private T MalformedOutputOf<T>(ReplayFault fault, string name, object? input, ReplayStepRule? rule)
     {
         var holdsText = typeof(T) == typeof(string) || typeof(T) == typeof(object);
+        if (fault.Kind == FaultKind.Returns)
+        {
+            try
+            {
+                return ConvertOutput<T>(fault.Value);
+            }
+            catch (Exception ex) when (ex is JsonException or NotSupportedException)
+            {
+                throw new InvalidOperationException(
+                    $"Fault on '{name}': the returned value doesn't convert to {typeof(T).Name}, the step's return " +
+                    "type. Use a value of that type, or make the step return an object.", ex);
+            }
+        }
+
         switch (fault.MalformedOutput)
         {
             case MalformedOutput.Empty:
-                return typeof(T) == typeof(string) ? (T)(object)"" : default!;
+                // Text when the step returns a string, or returns object and its recording holds text: the same rule
+                // as the Node and Python SDKs, which can only look at the recording.
+                var recordedOutput = FindRecording(name, input, rule, out _)?.Data.Output;
+                var isText = typeof(T) == typeof(string) || (typeof(T) == typeof(object) &&
+                    recordedOutput is string or JsonElement { ValueKind: JsonValueKind.String });
+                return isText ? (T)(object)"" : default!;
             case MalformedOutput.Truncated:
                 if (!holdsText)
                     throw new InvalidOperationException(
                         $"Fault on '{name}': a truncated output is JSON text, and the step returns {typeof(T).Name}. " +
-                        "Use it on a step that returns a string or an object, or give the malformed value yourself.");
+                        "Use it on a step that returns a string or an object, or give the value with ReplayFault.Returns.");
                 var recorded = FindRecording(name, input, rule, out _)
                     ?? throw new InvalidOperationException(
                         $"Fault on '{name}': there is no unused recording of the step to truncate. " +
-                        "Give the malformed value yourself instead.");
+                        "Give the value with ReplayFault.Returns instead.");
                 var text = recorded.Data.Output switch
                 {
                     string s => s,
@@ -240,16 +258,7 @@ public class VevalExecutionContext
                 };
                 return (T)(object)text.Substring(0, text.Length / 2);
             default:
-                try
-                {
-                    return ConvertOutput<T>(fault.MalformedValue);
-                }
-                catch (Exception ex) when (ex is JsonException or NotSupportedException)
-                {
-                    throw new InvalidOperationException(
-                        $"Fault on '{name}': the malformed value doesn't convert to {typeof(T).Name}, the step's return " +
-                        "type. Use a value of that type, or make the step return an object.", ex);
-                }
+                throw new InvalidOperationException($"Fault on '{name}': unknown malformed output.");
         }
     }
 
@@ -343,27 +352,31 @@ public class VevalExecutionContext
             : recordedType != null && _stopOnDivergenceTypes.Contains(recordedType);
 
     /// <summary>
-    /// Stops a live replay at this call: records the stop and a failed step for it, and returns the exception that
-    /// ends the run.
+    /// Stops a replay at this call: records the stop and a stopped step for it, and returns the exception that ends the
+    /// run. Once a fault has fired, the reason is <see cref="ReplayStopReason.AfterFault"/>: the fault, not the agent,
+    /// sent the run off its recording.
     /// </summary>
-    private ReplayStoppedException StopAt(string name, ReplayStopReason reason, object? recordedInput, object? input, string? recordedType)
+    /// <param name="diverged">The step has unused recordings, but none with this input.</param>
+    private ReplayStoppedException StopAt(string name, bool diverged, object? recordedInput, object? input, string? recordedType)
     {
         var position = _steps.Count + 1;
-        var detail = reason == ReplayStopReason.Diverged
+        var fault = _fidelity!.FirstFired;
+        var reason = fault != null ? ReplayStopReason.AfterFault
+            : diverged ? ReplayStopReason.Diverged : ReplayStopReason.NoRecording;
+        var detail = diverged
             ? $"its input matches no unused recording of '{name}', so what the real step would return is unknown. " +
               $"Recorded input: {OneLine(recordedInput)}. Actual input: {OneLine(input)}."
             : $"the recording has no unused call of '{name}' to serve ({RecordedCallsOf(name)}).";
-        var advice = reason == ReplayStopReason.Diverged
+        var advice = fault != null
+            ? " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
+              "call whose input now carries the error), so no recorded output can stand in for it. " +
+              (_liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.")
+            : diverged
             ? " If the model took a different path, record that path. If your code changed how the step is called, " +
               "re-record, or replay mocked to test this change. If this input doesn't affect the step's output, " +
               "match it on name only (StepRules)."
             : " If the model took a different path, record that path. If your code added this call, re-record, or " +
               "replay mocked to test this change.";
-        var fault = _fidelity!.FirstFired;
-        if (fault != null && !_liveModelSteps)
-            advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
-                     "call whose input now carries the error), so no recorded output can stand in for it. Replay live to run " +
-                     "model steps for real, or record a trace of this path.";
         var where = fault != null ? $" after an injected fault ({fault.Description})" : "";
         var message = $"{(_liveModelSteps ? "Live replay" : "Replay")} stopped at step {position} ('{name}'){where}: {detail} " +
                       "The replay is inconclusive: it neither passed nor failed." + advice;

@@ -33,8 +33,13 @@ export function scenarioReplayOptions(item: ScenarioItem, options: ScenarioOptio
     live_model_steps: !mocked,
     assertions,
     step_rules: mergeStepRules(options?.step_rules, item.step_rules),
+    faults: [...(options?.faults ?? []), ...(item.faults ?? [])],
   };
 }
+
+/** @internal */
+export const SYNTHETIC_ITEM_FAULTS_MESSAGE =
+  "ScenarioItem.faults needs a trace-backed item (trace_id): faults replace recorded outputs, and a synthetic item has none.";
 
 /** The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step. */
 export function mergeStepRules(
@@ -263,6 +268,9 @@ export class VevalSdk {
             await report.sendTraceAsync(payload);
           }
         }
+      } else if ((item.faults?.length ?? 0) > 0) {
+        itemResult.failures.push(SYNTHETIC_ITEM_FAULTS_MESSAGE);
+        itemResult.passed = false;
       } else if (item.input !== undefined) {
         const ctx = await this._runAndCaptureContext(scenarioName, agent, item.input, report);
         for (const assertion of effectiveAssertions) {

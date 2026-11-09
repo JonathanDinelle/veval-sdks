@@ -136,6 +136,10 @@ public class VevalSdk : IVevalSdk
                     await report.SendTraceAsync(replayPayload);
                 }
             }
+            else if (item.Faults.Count > 0)
+            {
+                itemResult.Failures.Add(SyntheticItemFaultsMessage);
+            }
             else if (item.Input != null)
             {
                 // Synthetic item: live run with real LLM
@@ -173,10 +177,14 @@ public class VevalSdk : IVevalSdk
             LiveModelSteps = !mocked,
             Assertions = assertions,
             StepRules = MergeStepRules(options.StepRules, item.StepRules),
+            Faults = options.Faults.Concat(item.Faults).ToList(),
         };
     }
 
     /// <summary>The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step.</summary>
+    internal const string SyntheticItemFaultsMessage =
+        "ScenarioItem.Faults needs a trace-backed item (TraceId): faults replace recorded outputs, and a synthetic item has none.";
+
     internal static Dictionary<string, ReplayStepRule> MergeStepRules(
         IReadOnlyDictionary<string, ReplayStepRule>? scenarioRules, IReadOnlyDictionary<string, ReplayStepRule> itemRules)
     {

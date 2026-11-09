@@ -141,7 +141,7 @@ public class FaultInjectionTests
         result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
         result.Passed.Should().BeFalse();
         result.Inconclusive!.StepName.Should().Be("search_trains");
-        result.Inconclusive.Reason.Should().Be(ReplayStopReason.NoRecording);
+        result.Inconclusive.Reason.Should().Be(ReplayStopReason.AfterFault);
         result.Inconclusive.Message.Should().StartWith("Replay stopped at step 2 ('search_trains') after an injected fault (HTTP 500 on 'search_flights')");
         result.Status.Should().Be("inconclusive");
     }
@@ -159,7 +159,8 @@ public class FaultInjectionTests
 
         result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
         result.Inconclusive!.StepName.Should().Be("summarize");
-        result.Inconclusive.Reason.Should().Be(ReplayStopReason.Diverged);
+        result.Inconclusive.Reason.Should().Be(ReplayStopReason.AfterFault);
+        result.Inconclusive.Message.Should().Contain("its input matches no unused recording of 'summarize'");
     }
 
     [Fact]
@@ -241,30 +242,66 @@ public class FaultInjectionTests
     }
 
     [Fact]
-    public async Task Malformed_EmptyAndValue()
+    public async Task Malformed_EmptyAndReturns()
     {
         var seen = new List<object?>();
         await Sdk().ReplayAsync(Trace(), async ctx =>
         {
             seen.Add(await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live")));
             seen.Add(await ctx.TrackStepAsync<object>("search_flights", "Paris", () => Task.FromResult<object>("live")));
+            seen.Add(await ctx.TrackStepAsync<object>("search_flights", "Paris", () => Task.FromResult<object>("live")));
             return "";
         }, Mocked(
             ReplayFault.Malformed("search_flights", MalformedOutput.Empty).Times(1),
-            ReplayFault.Malformed("search_flights", 42).Times(1)));
+            ReplayFault.Malformed("search_flights", MalformedOutput.Empty).OnCall(2).Times(1),
+            ReplayFault.Returns("search_flights", 42).Times(1)));
 
         seen[0].Should().Be("");
-        seen[1].Should().Be(42);
+        seen[1].Should().Be("", "an object step whose recording holds text is a text step, as in Node and Python");
+        seen[2].Should().Be(42);
     }
 
     [Fact]
-    public async Task Malformed_ValueOfWrongType_ExplainsTheConversion()
+    public async Task Malformed_EmptyOnATypedStep_IsTheDefault()
+    {
+        var trace = Trace();
+        trace.Steps[0].Output = new List<string> { "AF123" };
+        List<string>? seen = new();
+        await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            seen = await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult(new List<string>()));
+            return "";
+        }, Mocked(ReplayFault.Malformed("search_flights", MalformedOutput.Empty)));
+
+        seen.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Returns_ValueOfWrongType_ExplainsTheConversion()
     {
         var result = await Sdk().ReplayAsync(Trace(), async ctx =>
             await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult(new List<string>())),
-            Mocked(ReplayFault.Malformed("search_flights", 42)));
+            Mocked(ReplayFault.Returns("search_flights", 42)));
 
         result.Failures.Should().Contain(f => f.Contains("doesn't convert to List`1"));
+    }
+
+    [Fact]
+    public async Task EveryCallFault_StillFailsOnRecordingsBeforeTheFaultedStep()
+    {
+        var trace = Trace();
+        trace.Steps.Insert(0, Recorded("load_profile", "Paris", "frequent flyer", "tool"));
+
+        // A regression drops load_profile; the fault on search_flights must not excuse it.
+        var result = await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            try { return await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live")); }
+            catch (FaultHttpException) { return "Search is down"; }
+        }, Mocked(ReplayFault.HttpError("search_flights", 503)));
+
+        result.Outcome.Should().Be(ReplayOutcome.Failed);
+        result.Failures.Should().ContainSingle().Which.Should()
+            .Contain("never called 1 recorded step(s)").And.Contain("'load_profile' (recorded step 1)");
     }
 
     [Fact]
@@ -347,6 +384,78 @@ public class FaultInjectionTests
     {
         ReplayFault.HttpError("book", 503).Times(2).Description.Should().Be("HTTP 503 on 'book' (first 2 calls)");
         ReplayFault.RateLimit("llm").Description.Should().Be("Rate limit (429, Retry-After 1s) on 'llm'");
+        ReplayFault.Returns("parse", 42).Description.Should().Be("Returned value on 'parse'");
         FluentActions.Invoking(() => ReplayFault.HttpError("book", 200)).Should().Throw<ArgumentOutOfRangeException>();
+    }
+
+    // --- Faults in scenarios ---------------------------------------------------------------------------------------
+
+    private static VevalTestSdk TestSdk() => new VevalTestSdk(new VevalOptions { ApiKey = "test" }).WithReplay(Trace());
+
+    [Fact]
+    public async Task Scenario_FaultsApplyToTraceBackedItems_AndAreReported()
+    {
+        var result = await TestSdk().RunScenarioAsync("travel", Agent(retries: 1), [TraceAssert.MaxAttempts("search_flights", 1)],
+            [new ScenarioItem { Name = "recovers", TraceId = "tr_faults" }],
+            new ScenarioOptions { Faults = { ReplayFault.Timeout("search_flights").Times(1) } });
+
+        result.Passed.Should().BeTrue(result.Summary);
+        var item = result.Results.Single();
+        item.Faults.Should().ContainSingle().Which.Fired.Should().Be(1);
+
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(Internal.ScenarioReport.RunPayload(result, "synthetic"));
+        var fault = json.GetProperty("results")[0].GetProperty("faults")[0];
+        fault.GetProperty("description").GetString().Should().Be("Timeout on 'search_flights' (first call)");
+        fault.GetProperty("step_name").GetString().Should().Be("search_flights");
+        fault.GetProperty("fired").GetInt32().Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Scenario_ItemFaultsAddToScenarioFaults()
+    {
+        var result = await TestSdk().RunScenarioAsync("travel", Agent(retries: 2), [],
+            [new ScenarioItem { TraceId = "tr_faults", Faults = { ReplayFault.HttpError("search_flights", 503).Times(1) } }],
+            new ScenarioOptions { Faults = { ReplayFault.Timeout("search_flights").Times(1) } });
+
+        result.Passed.Should().BeTrue(result.Summary);
+        result.Results.Single().Faults.Select(f => f.Fired).Should().Equal(1, 1);
+    }
+
+    [Fact]
+    public async Task Scenario_InconclusiveAfterFault_FailsTheRunWhateverTheAllowance()
+    {
+        var result = await TestSdk().RunScenarioAsync("travel", async ctx =>
+        {
+            try { return await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live")); }
+            catch (FaultHttpException)
+            {
+                return await ctx.TrackStepAsync("search_trains", "Paris", () => Task.FromResult("live"),
+                    new StepOptions { Type = StepType.Tool });
+            }
+        }, [],
+            [new ScenarioItem { Name = "fallback", TraceId = "tr_faults", Faults = { ReplayFault.HttpError("search_flights", 500) } }],
+            new ScenarioOptions { MaxInconclusiveRate = 1 });
+
+        result.Passed.Should().BeFalse();
+        result.InconclusiveCount.Should().Be(1);
+        result.InconclusiveAfterFaultCount.Should().Be(1);
+        result.InconclusiveRate.Should().Be(0);
+        result.StayedOnPathRate.Should().BeNull();
+        result.Results.Single().InconclusiveAfterFault.Should().BeTrue();
+        result.Summary.Should().Be("failed: inconclusive after a fault — 0 passed, 0 failed, 0 inconclusive, 1 inconclusive after a fault");
+
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(Internal.ScenarioReport.RunPayload(result, "synthetic"));
+        json.GetProperty("inconclusive_count").GetInt32().Should().Be(1);
+        json.GetProperty("inconclusive_after_fault_count").GetInt32().Should().Be(1);
+        json.GetProperty("results")[0].GetProperty("inconclusive").GetProperty("reason").GetString().Should().Be("after_fault");
+    }
+
+    [Fact]
+    public async Task Scenario_SyntheticItemWithFaults_Fails()
+    {
+        var result = await TestSdk().RunScenarioAsync("travel", Agent(retries: 0), [],
+            [new ScenarioItem { Name = "synthetic", Input = "Paris", Faults = { ReplayFault.Timeout("search_flights") } }]);
+
+        result.Results.Single().Failures.Should().ContainSingle().Which.Should().Contain("needs a trace-backed item");
     }
 }

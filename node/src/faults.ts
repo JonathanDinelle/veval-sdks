@@ -8,13 +8,15 @@ export type FaultKind =
   | "rate_limit"
   /** Returns a malformed value instead of throwing (`MalformedOutput`). */
   | "malformed"
+  /** Returns a value you give instead of the recorded output (`ReplayFault.returns`). */
+  | "returns"
   /** Throws the error the fault's factory builds. */
   | "custom";
 
 /**
  * A malformed output a `ReplayFault.malformed` fault returns.
  * - `truncated`: the step's recorded output as JSON text, cut in half. Needs an unused recording of the step.
- * - `empty`: `""` when the recorded output is text, `null` otherwise.
+ * - `empty`: `""` for a step whose output is text (the recording holds text), `null` otherwise.
  */
 export type MalformedOutput = "truncated" | "empty";
 
@@ -34,10 +36,10 @@ export class ReplayFault {
   readonly status: number | null;
   /** The `Retry-After` of a `rate_limit` fault, in seconds. */
   readonly retry_after_seconds: number | null;
-  /** What a `malformed` fault returns, unless it returns `malformed_value`. */
+  /** What a `malformed` fault returns. */
   readonly malformed_output: MalformedOutput | null;
-  /** The value a `malformed` fault built with a value returns. */
-  readonly malformed_value: unknown;
+  /** The value a `returns` fault returns. */
+  readonly value: unknown;
   private readonly _errorFactory: (() => unknown) | null;
   private _count: number | null = null;
   private _fromCall = 1;
@@ -58,7 +60,7 @@ export class ReplayFault {
     this.status = extra.status ?? null;
     this.retry_after_seconds = extra.retryAfterSeconds ?? null;
     this.malformed_output = extra.malformed ?? null;
-    this.malformed_value = extra.value;
+    this.value = extra.value;
     this._errorFactory = extra.factory ?? null;
   }
 
@@ -80,14 +82,19 @@ export class ReplayFault {
     return new ReplayFault(stepName, "rate_limit", { status: 429, retryAfterSeconds });
   }
 
+  /** The step returns a malformed output instead of throwing, so the guard that parses it runs. */
+  static malformed(stepName: string, output: MalformedOutput): ReplayFault {
+    if (output !== "truncated" && output !== "empty")
+      throw new RangeError(`A malformed output is "truncated" or "empty", not ${JSON.stringify(output)}. Use ReplayFault.returns for a value.`);
+    return new ReplayFault(stepName, "malformed", { malformed: output });
+  }
+
   /**
-   * The step returns a malformed output instead of throwing, so the guard that parses it runs: `"truncated"` or
-   * `"empty"`, or any other value (e.g. one of the wrong type) given as `{ value }`.
+   * The step returns this value instead of its recorded output: a value of the wrong type, or the value your step
+   * returns when its own call fails (an error message, a fallback), to test the code that reads it.
    */
-  static malformed(stepName: string, output: MalformedOutput | { value: unknown }): ReplayFault {
-    return typeof output === "string"
-      ? new ReplayFault(stepName, "malformed", { malformed: output })
-      : new ReplayFault(stepName, "malformed", { value: output.value });
+  static returns(stepName: string, value: unknown): ReplayFault {
+    return new ReplayFault(stepName, "returns", { value });
   }
 
   /** The step throws the error this factory builds, for clients with their own error types. */
@@ -145,7 +152,8 @@ export class ReplayFault {
       this.kind === "timeout" ? "Timeout"
       : this.kind === "http_error" ? `HTTP ${this.status}`
       : this.kind === "rate_limit" ? `Rate limit (429, Retry-After ${formatSeconds(this.retry_after_seconds!)}s)`
-      : this.kind === "malformed" ? `Malformed output (${this.malformed_output ?? "value"})`
+      : this.kind === "malformed" ? `Malformed output (${this.malformed_output})`
+      : this.kind === "returns" ? "Returned value"
       : "Custom exception";
     const scope: string[] = [];
     if (this._count !== null) scope.push(this._count === 1 ? "first call" : `first ${this._count} calls`);
@@ -174,7 +182,7 @@ export class ReplayFault {
         return error;
       }
       default:
-        throw new Error(`A ${this.kind} fault doesn't throw.`);
+        throw new Error(`A ${this.kind} fault returns a value; it doesn't throw.`);
     }
   }
 }

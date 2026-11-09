@@ -13,6 +13,8 @@ public enum FaultKind
     RateLimit,
     /// <summary>Returns a malformed value instead of throwing (<see cref="MalformedOutput"/>).</summary>
     Malformed,
+    /// <summary>Returns a value you give instead of the recorded output (<see cref="ReplayFault.Returns"/>).</summary>
+    Returns,
     /// <summary>Throws the exception the fault's factory builds.</summary>
     Custom,
 }
@@ -25,7 +27,10 @@ public enum MalformedOutput
     /// Needs an unused recording of the step to cut.
     /// </summary>
     Truncated,
-    /// <summary>An empty value: <c>""</c> for a string step, <c>null</c> (the type's default) otherwise.</summary>
+    /// <summary>
+    /// An empty value: <c>""</c> for a step whose output is text (it returns a string, or the recording holds text),
+    /// <c>null</c> (the type's default) otherwise.
+    /// </summary>
     Empty,
 }
 
@@ -51,10 +56,10 @@ public sealed class ReplayFault
     public int? StatusCode { get; }
     /// <summary>The <c>Retry-After</c> of a <see cref="FaultKind.RateLimit"/> fault.</summary>
     public TimeSpan? RetryAfter { get; }
-    /// <summary>What a <see cref="FaultKind.Malformed"/> fault returns, unless it returns a <see cref="MalformedValue"/>.</summary>
+    /// <summary>What a <see cref="FaultKind.Malformed"/> fault returns.</summary>
     public MalformedOutput? MalformedOutput { get; }
-    /// <summary>The value a <see cref="FaultKind.Malformed"/> fault built with <see cref="MalformedValue"/> returns.</summary>
-    public object? MalformedValue { get; }
+    /// <summary>The value a <see cref="FaultKind.Returns"/> fault returns.</summary>
+    public object? Value { get; }
     /// <summary>How many matching calls the fault fails; null fails every one.</summary>
     public int? Count { get; private set; }
     /// <summary>The 1-based call of the step from which the fault applies; earlier calls are served as usual.</summary>
@@ -65,7 +70,7 @@ public sealed class ReplayFault
     public object? Input => _input;
 
     private ReplayFault(string stepName, FaultKind kind, int? statusCode = null, TimeSpan? retryAfter = null,
-        MalformedOutput? malformed = null, object? malformedValue = null, Func<Exception>? factory = null)
+        MalformedOutput? malformed = null, object? value = null, Func<Exception>? factory = null)
     {
         if (string.IsNullOrEmpty(stepName)) throw new ArgumentException("A fault needs a step name.", nameof(stepName));
         StepName = stepName;
@@ -73,7 +78,7 @@ public sealed class ReplayFault
         StatusCode = statusCode;
         RetryAfter = retryAfter;
         MalformedOutput = malformed;
-        MalformedValue = malformedValue;
+        Value = value;
         _exceptionFactory = factory;
     }
 
@@ -101,11 +106,12 @@ public sealed class ReplayFault
         new(stepName, FaultKind.Malformed, malformed: output);
 
     /// <summary>
-    /// The step returns this value instead of its recorded output, e.g. a value of the wrong type. It must convert to
-    /// the step's return type, as a recorded output does.
+    /// The step returns this value instead of its recorded output: a value of the wrong type, or the value your step
+    /// returns when its own call fails (an error message, a fallback), to test the code that reads it. It must
+    /// convert to the step's return type, as a recorded output does.
     /// </summary>
-    public static ReplayFault Malformed(string stepName, object? value) =>
-        new(stepName, FaultKind.Malformed, malformedValue: value);
+    public static ReplayFault Returns(string stepName, object? value) =>
+        new(stepName, FaultKind.Returns, value: value);
 
     /// <summary>The step throws the exception this factory builds, for clients with their own exception types.</summary>
     public static ReplayFault Throw(string stepName, Func<Exception> exceptionFactory) =>
@@ -148,7 +154,8 @@ public sealed class ReplayFault
                 FaultKind.Timeout => "Timeout",
                 FaultKind.HttpError => $"HTTP {StatusCode}",
                 FaultKind.RateLimit => $"Rate limit (429, Retry-After {RetryAfter!.Value.TotalSeconds:0.###}s)",
-                FaultKind.Malformed => MalformedOutput is { } m ? $"Malformed output ({m.ToString().ToLowerInvariant()})" : "Malformed output (value)",
+                FaultKind.Malformed => $"Malformed output ({MalformedOutput!.Value.ToString().ToLowerInvariant()})",
+                FaultKind.Returns => "Returned value",
                 _ => "Custom exception",
             };
             var scope = new List<string>();
@@ -171,7 +178,7 @@ public sealed class ReplayFault
             FaultKind.HttpError or FaultKind.RateLimit => new FaultHttpException(message, StatusCode!.Value, RetryAfter),
             FaultKind.Custom => _exceptionFactory!() ?? throw new InvalidOperationException(
                 $"The exception factory of the fault on '{StepName}' returned null."),
-            _ => throw new InvalidOperationException($"A {Kind} fault doesn't throw."),
+            _ => throw new InvalidOperationException($"A {Kind} fault returns a value; it doesn't throw."),
         };
     }
 }

@@ -1,7 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FaultHttpError, FaultTimeoutError, ReplayFault, ReplayOptions, TraceAssert, TraceData, VevalExecutionContext } from "../src";
-import { recorded, sdk } from "./helpers";
+import { ScenarioReport } from "../src/scenario-report";
+import { recorded, sdk, testSdk } from "./helpers";
 
 // Fault injection: replay serves a declared failure instead of a step's recorded output.
 
@@ -111,7 +112,7 @@ test("a fallback tool the recording never called is inconclusive in mocked mode"
   assert.equal(result.outcome, "inconclusive");
   assert.equal(result.passed, false);
   assert.equal(result.inconclusive!.step_name, "search_trains");
-  assert.equal(result.inconclusive!.reason, "no_recording");
+  assert.equal(result.inconclusive!.reason, "after_fault");
   assert.ok(result.inconclusive!.message.startsWith(
     "Replay stopped at step 2 ('search_trains') after an injected fault (HTTP 500 on 'search_flights')"));
   assert.equal(result.status, "inconclusive");
@@ -127,7 +128,8 @@ test("after a fault, a model call whose input carries the error is inconclusive 
 
   assert.equal(result.outcome, "inconclusive");
   assert.equal(result.inconclusive!.step_name, "summarize");
-  assert.equal(result.inconclusive!.reason, "diverged");
+  assert.equal(result.inconclusive!.reason, "after_fault");
+  assert.match(result.inconclusive!.message, /its input matches no unused recording of 'summarize'/);
 });
 
 test("live replay: the model step after a fault runs live", async () => {
@@ -179,7 +181,7 @@ test("truncated output is half the recorded JSON, then the guard retries", async
   assert.deepEqual(outputs, ['["AF123"', FLIGHTS]);
 });
 
-test("empty and value malformed outputs", async () => {
+test("empty and returned outputs", async () => {
   const seen: unknown[] = [];
   await sdk().replayAsync(trace(), async (ctx) => {
     seen.push(await ctx.trackStepAsync("search_flights", "Paris", async () => "live"));
@@ -187,9 +189,37 @@ test("empty and value malformed outputs", async () => {
     return "";
   }, mocked(
     ReplayFault.malformed("search_flights", "empty").times(1),
-    ReplayFault.malformed("search_flights", { value: 42 }).times(1)));
+    ReplayFault.returns("search_flights", 42).times(1)));
 
   assert.deepEqual(seen, ["", 42]);
+});
+
+test("empty on a step whose recording isn't text is null", async () => {
+  const t = trace();
+  t.steps[0].output = ["AF123"];
+  let seen: unknown = "unset";
+  await sdk().replayAsync(t, async (ctx) => {
+    seen = await ctx.trackStepAsync("search_flights", "Paris", async () => ["live"]);
+    return "";
+  }, mocked(ReplayFault.malformed("search_flights", "empty")));
+
+  assert.equal(seen, null);
+});
+
+test("an every-call fault still fails on recordings before the faulted step", async () => {
+  const t = trace();
+  t.steps.unshift(recorded("load_profile", "Paris", "frequent flyer", "tool"));
+
+  // A regression drops load_profile; the fault on search_flights must not excuse it.
+  const result = await sdk().replayAsync(t, async (ctx) => {
+    try { return await ctx.trackStepAsync("search_flights", "Paris", async () => "live"); }
+    catch { return "Search is down"; }
+  }, mocked(ReplayFault.httpError("search_flights", 503)));
+
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failures.length, 1);
+  assert.match(result.failures[0], /never called 1 recorded step\(s\)/);
+  assert.match(result.failures[0], /'load_profile' \(recorded step 1\)/);
 });
 
 test("a fault that never fires fails the replay", async () => {
@@ -250,5 +280,67 @@ test("faults without a mocked or live replay throw", async () => {
 test("description names kind, step and scope", () => {
   assert.equal(ReplayFault.httpError("book", 503).times(2).description, "HTTP 503 on 'book' (first 2 calls)");
   assert.equal(ReplayFault.rateLimit("llm").description, "Rate limit (429, Retry-After 1s) on 'llm'");
+  assert.equal(ReplayFault.returns("parse", 42).description, "Returned value on 'parse'");
   assert.throws(() => ReplayFault.httpError("book", 200), RangeError);
+});
+
+// --- Faults in scenarios -----------------------------------------------------------------------------------------
+
+test("scenario: faults apply to trace-backed items and are reported", async () => {
+  const result = await testSdk().withReplay(trace()).runScenarioAsync("travel", agent(1),
+    [TraceAssert.maxAttempts("search_flights", 1)],
+    [{ name: "recovers", trace_id: "tr_faults", assertions: [] }],
+    { faults: [ReplayFault.timeout("search_flights").times(1)] });
+
+  assert.equal(result.passed, true, result.summary);
+  assert.deepEqual(result.results[0].faults!.map((f) => f.fired), [1]);
+
+  const payload = ScenarioReport.runPayload(result, "synthetic") as { results: Array<{ faults: unknown[] }> };
+  assert.deepEqual(payload.results[0].faults,
+    [{ description: "Timeout on 'search_flights' (first call)", step_name: "search_flights", fired: 1 }]);
+});
+
+test("scenario: item faults add to scenario faults", async () => {
+  const result = await testSdk().withReplay(trace()).runScenarioAsync("travel", agent(2), [],
+    [{ trace_id: "tr_faults", assertions: [], faults: [ReplayFault.httpError("search_flights", 503).times(1)] }],
+    { faults: [ReplayFault.timeout("search_flights").times(1)] });
+
+  assert.equal(result.passed, true, result.summary);
+  assert.deepEqual(result.results[0].faults!.map((f) => f.fired), [1, 1]);
+});
+
+test("scenario: an item inconclusive after a fault fails the run whatever the allowance", async () => {
+  const result = await testSdk().withReplay(trace()).runScenarioAsync("travel", async (ctx) => {
+    try {
+      return await ctx.trackStepAsync("search_flights", "Paris", async () => "live");
+    } catch {
+      return ctx.trackStepAsync("search_trains", "Paris", async () => "live", { type: "tool" });
+    }
+  }, [],
+    [{ name: "fallback", trace_id: "tr_faults", assertions: [], faults: [ReplayFault.httpError("search_flights", 500)] }],
+    { max_inconclusive_rate: 1 });
+
+  assert.equal(result.passed, false);
+  assert.equal(result.inconclusive_count, 1);
+  assert.equal(result.inconclusive_after_fault_count, 1);
+  assert.equal(result.inconclusive_rate, 0);
+  assert.equal(result.stayed_on_path_rate, null);
+  assert.equal(result.results[0].inconclusive_after_fault, true);
+  assert.equal(result.summary,
+    "failed: inconclusive after a fault — 0 passed, 0 failed, 0 inconclusive, 1 inconclusive after a fault");
+
+  const payload = ScenarioReport.runPayload(result, "synthetic") as {
+    inconclusive_count: number; inconclusive_after_fault_count: number; results: Array<{ inconclusive: { reason: string } }>;
+  };
+  assert.equal(payload.inconclusive_count, 1);
+  assert.equal(payload.inconclusive_after_fault_count, 1);
+  assert.equal(payload.results[0].inconclusive.reason, "after_fault");
+});
+
+test("scenario: a synthetic item with faults fails", async () => {
+  const result = await testSdk().runScenarioAsync("travel", agent(0), [],
+    [{ name: "synthetic", input: "Paris", assertions: [], faults: [ReplayFault.timeout("search_flights")] }]);
+
+  assert.equal(result.results[0].failures.length, 1);
+  assert.match(result.results[0].failures[0], /needs a trace-backed item/);
 });

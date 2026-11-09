@@ -23,18 +23,22 @@ internal static class ResultSummary
     public static string ForScenario(ScenarioRunResult result)
     {
         var tooManyInconclusive = result.InconclusiveRate > result.MaxInconclusiveRate;
+        var afterFault = result.InconclusiveAfterFaultCount;
+        var otherInconclusive = result.InconclusiveCount - afterFault;
         // The reason comes first: "failed ... 0 failed" would otherwise read like a bug.
         var head = result.Passed ? "passed"
+            : result.FailCount == 0 && afterFault > 0 ? "failed: inconclusive after a fault"
             : result.FailCount == 0 && tooManyInconclusive ? "failed: too many inconclusive"
             : "failed";
-        var line = $"{head} — {result.PassCount} passed, {result.FailCount} failed, {result.InconclusiveCount} inconclusive";
-        if (result.InconclusiveCount > 0)
+        var line = $"{head} — {result.PassCount} passed, {result.FailCount} failed, {otherInconclusive} inconclusive";
+        if (otherInconclusive > 0)
             line += tooManyInconclusive
                 ? $" ({Percent(result.InconclusiveRate)} of replays > {Percent(result.MaxInconclusiveRate)} allowed)"
                 : $" ({Percent(result.InconclusiveRate)} of replays, within {Percent(result.MaxInconclusiveRate)} allowed)";
-        var replayed = result.Results.Count(r => r.Replayed);
+        if (afterFault > 0) line += $", {afterFault} inconclusive after a fault";
+        var replayed = result.Results.Count(r => r.Replayed && !r.InconclusiveAfterFault);
         if (replayed > 0)
-            line += $", {replayed - result.InconclusiveCount}/{replayed} replays stayed on path";
+            line += $", {replayed - otherInconclusive}/{replayed} replays stayed on path";
         return line;
     }
 

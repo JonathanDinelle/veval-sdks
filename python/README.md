@@ -153,7 +153,7 @@ replay = sdk.replay(trace, my_agent, ReplayOptions(
 ))
 ```
 
-A fault that never fires fails the replay, and `replay.faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive.
+A fault that never fires fails the replay, and `replay.faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive (reason `"after_fault"`). `ReplayFault.returns(step, value)` serves a value of your choice. A fault replaces the whole step, so it tests code around the step; if your retry catches your client's exception type (e.g. `anthropic.RateLimitError`), inject that type with `ReplayFault.throw`. Scenarios take faults too: `ScenarioOptions(faults=...)` and `ScenarioItem(faults=...)`.
 
 Store a known-good run — every step with its input and output — and detect when a new run drifts from it: a changed prompt or tool argument, a step added, dropped, repeated, or reordered:
 

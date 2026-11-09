@@ -52,7 +52,7 @@ const result = await veval.replayAsync(trace, (ctx) => agent.execute(ctx), {
 });
 ```
 
-A fault that never fires fails the replay, and `result.faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive.
+A fault that never fires fails the replay, and `result.faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive (reason `"after_fault"`). `ReplayFault.returns(step, value)` serves a value of your choice. A fault replaces the whole step, so it tests code around the step; if your retry catches your client's error type (e.g. `Anthropic.RateLimitError`), inject that type with `ReplayFault.throw`. Scenarios take faults too: `faults` in the scenario options and on an item.
 
 `saveSnapshotAsync(name, traceIdOrCtx, options?)` stores a named baseline for `matchesSnapshot` and `compareSnapshotAsync`. The baseline and its trace are pinned, so retention doesn't delete them. Pins are limited per plan: at the limit, saving a new name throws a `VevalRequestError` with status 409. Pass `{ pinned: false }` to save a baseline that expires with retention.
 

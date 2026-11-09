@@ -48,12 +48,17 @@ export interface ReplayStepRule {
   on_divergence?: OnDivergence;
 }
 
-/** Why a live replay stopped. */
+/** Why a replay stopped. */
 export type ReplayStopReason =
   /** The call's input matched no unused recording of its step, and the step stops on divergence. */
   | "diverged"
   /** The recording has no unused call of that step to serve, and it isn't a model step that can run live. */
-  | "no_recording";
+  | "no_recording"
+  /**
+   * An injected fault (`ReplayOptions.faults`) sent the agent off its recording: this call matches no unused
+   * recording. Past the fault the recording can't say what the real step would return.
+   */
+  | "after_fault";
 
 /**
  * Where a live replay left its recording and stopped. Past this step nobody knows what the real tools would have
@@ -101,6 +106,8 @@ export class ReplayFidelity {
   private readonly _faults: ReplayFault[];
   private readonly _fired: number[];
   private _firstFired: ReplayFault | null = null;
+  /** Recordings from this index on may go unused: a fault that fails every call fired there. Null while none has. */
+  private _unusedExcusedFrom: number | null = null;
 
   /** @internal */
   constructor(recorded: UnusedRecording[], faults: ReplayFault[] = []) {
@@ -160,7 +167,16 @@ export class ReplayFidelity {
   /** @internal */
   fired(faultIndex: number): void {
     this._fired[faultIndex]++;
-    this._firstFired ??= this._faults[faultIndex];
+    const fault = this._faults[faultIndex];
+    this._firstFired ??= fault;
+    if (fault.count !== null || this._fired[faultIndex] > 1) return;
+
+    // A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted step
+    // and everything after it may rightly go unused. Recordings before it were the agent's to call.
+    const ofStep = this._unused.filter((u) => u.step_name === fault.step_name).map((u) => u.recorded_index);
+    const used = this._bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index! + 1);
+    const from = ofStep.length > 0 ? Math.min(...ofStep) : Math.max(0, ...used);
+    this._unusedExcusedFrom = this._unusedExcusedFrom === null ? from : Math.min(this._unusedExcusedFrom, from);
   }
 
   /** No call diverged and every recorded step was called. Live calls don't count against it. */
@@ -191,16 +207,7 @@ export class ReplayFidelity {
    * agent threw, since the exception already explains the rest.
    */
   failure(traceId: string, liveModelSteps: boolean): string | null {
-    if (liveModelSteps) return this.noLiveStepFailure(traceId);
-    return this.unusedRecordingsExpected ? null : this.unusedFailure(traceId);
-  }
-
-  /**
-   * A fault that fails every call fired, so the agent took its fallback path and the rest of the recording may
-   * legitimately go unused. A fault limited with `times(n)` is expected to rejoin the recording.
-   */
-  private get unusedRecordingsExpected(): boolean {
-    return this._faults.some((f, i) => f.count === null && this._fired[i] > 0);
+    return liveModelSteps ? this.noLiveStepFailure(traceId) : this.unusedFailure(traceId);
   }
 
   /** @internal One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing. */
@@ -216,12 +223,18 @@ export class ReplayFidelity {
       });
   }
 
-  /** @internal The failure for recorded steps that were never called, or null when every recording was used. */
+  /**
+   * @internal The failure for recorded steps that were never called, or null when every recording was used. After a
+   * fault that fails every call, recordings from the faulted step on are excused: the agent took its fallback path.
+   * A fault limited with `times(n)` is expected to rejoin the recording.
+   */
   unusedFailure(traceId: string): string | null {
-    if (this._unused.length === 0) return null;
-    const steps = this._unused.map((u) => `'${u.step_name}' (recorded step ${u.recorded_index + 1})`).join(", ");
+    const from = this._unusedExcusedFrom;
+    const unused = this._unused.filter((u) => from === null || u.recorded_index < from);
+    if (unused.length === 0) return null;
+    const steps = unused.map((u) => `'${u.step_name}' (recorded step ${u.recorded_index + 1})`).join(", ");
     return (
-      `Replay never called ${this._unused.length} recorded step(s) from trace ${traceId}: ${steps}. ` +
+      `Replay never called ${unused.length} recorded step(s) from trace ${traceId}: ${steps}. ` +
       "The agent skipped part of the recorded run, so its assertions may be passing on a path the recording does not cover."
     );
   }

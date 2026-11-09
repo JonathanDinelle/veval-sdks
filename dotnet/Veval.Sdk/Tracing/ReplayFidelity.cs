@@ -75,7 +75,20 @@ public class ReplayFidelity
     {
         _fired[faultIndex]++;
         FirstFired ??= _faults[faultIndex];
+        var fault = _faults[faultIndex];
+        if (fault.Count != null || _fired[faultIndex] > 1) return;
+
+        // A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted
+        // step and everything after it may rightly go unused. Recordings before it were the agent's to call.
+        var fromIndex = _unused.Where(u => u.StepName == fault.StepName).Select(u => (int?)u.RecordedIndex).Min()
+                        ?? (_bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex!.Value + 1).DefaultIfEmpty(0).Max());
+        _unusedExcusedFrom = _unusedExcusedFrom is { } current ? Math.Min(current, fromIndex) : fromIndex;
     }
+
+    /// <summary>
+    /// Recordings from this index on may go unused: a fault that fails every call fired there. Null while none has.
+    /// </summary>
+    private int? _unusedExcusedFrom;
 
     internal void Record(ReplayBinding binding)
     {
@@ -89,13 +102,7 @@ public class ReplayFidelity
     /// agent threw, since the exception already explains the rest.
     /// </summary>
     internal string? Failure(string traceId, bool liveModelSteps) =>
-        liveModelSteps ? NoLiveStepFailure(traceId) : UnusedRecordingsExpected ? null : UnusedFailure(traceId);
-
-    /// <summary>
-    /// A fault that fails every call fired, so the agent took its fallback path and the rest of the recording may
-    /// legitimately go unused. A fault limited with <see cref="ReplayFault.Times"/> is expected to rejoin the recording.
-    /// </summary>
-    private bool UnusedRecordingsExpected => _faults.Where((f, i) => f.Count == null && _fired[i] > 0).Any();
+        liveModelSteps ? NoLiveStepFailure(traceId) : UnusedFailure(traceId);
 
     /// <summary>One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing.</summary>
     internal IEnumerable<string> UnfiredFaultFailures(Func<string, int> callsOf) =>
@@ -109,11 +116,16 @@ public class ReplayFidelity
         });
 
     /// <summary>The failure for recorded steps that were never called, or null when every recording was used.</summary>
+    /// <remarks>
+    /// After a fault that fails every call, recordings from the faulted step on are excused: the agent took its
+    /// fallback path. A fault limited with <see cref="ReplayFault.Times"/> is expected to rejoin the recording.
+    /// </remarks>
     internal string? UnusedFailure(string traceId)
     {
-        if (_unused.Count == 0) return null;
-        var steps = string.Join(", ", _unused.Select(u => $"'{u.StepName}' (recorded step {u.RecordedIndex + 1})"));
-        return $"Replay never called {_unused.Count} recorded step(s) from trace {traceId}: {steps}. " +
+        var unused = _unused.Where(u => _unusedExcusedFrom is not { } from || u.RecordedIndex < from).ToList();
+        if (unused.Count == 0) return null;
+        var steps = string.Join(", ", unused.Select(u => $"'{u.StepName}' (recorded step {u.RecordedIndex + 1})"));
+        return $"Replay never called {unused.Count} recorded step(s) from trace {traceId}: {steps}. " +
                "The agent skipped part of the recorded run, so its assertions may be passing on a path the recording does not cover.";
     }
 

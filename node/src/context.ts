@@ -293,7 +293,7 @@ export class VevalExecutionContext {
     s.metadata["_fault"] = fault.description;
     this._steps.push(s);
 
-    if (fault.kind !== "malformed") {
+    if (fault.kind !== "malformed" && fault.kind !== "returns") {
       const error = fault.createError();
       s.fail(error instanceof Error ? error.message : String(error));
       throw error;
@@ -311,13 +311,13 @@ export class VevalExecutionContext {
   }
 
   private malformedOutputOf(fault: ReplayFault, name: string, input: unknown, rule: ReplayStepRule | undefined): unknown {
-    if (fault.malformed_output === null) return fault.malformed_value;
+    if (fault.kind === "returns") return fault.value;
     const { recorded } = this.findRecording(name, input, rule);
     const output = recorded?.data.output;
     if (fault.malformed_output === "empty") return typeof output === "string" ? "" : null;
     if (!recorded)
       throw new Error(
-        `Fault on '${name}': there is no unused recording of the step to truncate. Give the malformed value yourself instead.`
+        `Fault on '${name}': there is no unused recording of the step to truncate. Give the value with ReplayFault.returns instead.`
       );
     const text = typeof output === "string" ? output : JSON.stringify(output ?? null);
     return text.substring(0, Math.floor(text.length / 2));
@@ -347,28 +347,33 @@ export class VevalExecutionContext {
     return !!recordedType && this._stopOnDivergenceTypes.has(recordedType);
   }
 
-  /** Stops a live replay at this call: records the stop and a failed step for it, and returns the error that ends the run. */
+  /**
+   * Stops a replay at this call: records the stop and a stopped step for it, and returns the error that ends the run.
+   * `kind` says whether the step had unused recordings with other inputs ("diverged") or none ("no_recording"). Once a
+   * fault has fired, the stop's reason is "after_fault": the fault, not the agent, sent the run off its recording.
+   */
   private stopAt(
-    name: string, reason: ReplayStopReason, recordedInput: unknown, input: unknown, recordedType: string | null | undefined
+    name: string, kind: "diverged" | "no_recording", recordedInput: unknown, input: unknown, recordedType: string | null | undefined
   ): ReplayStoppedError {
     const position = this._steps.length + 1;
+    const fault = this._fidelity!.firstFired;
+    const reason: ReplayStopReason = fault ? "after_fault" : kind;
     const detail =
-      reason === "diverged"
+      kind === "diverged"
         ? `its input matches no unused recording of '${name}', so what the real step would return is unknown. ` +
           `Recorded input: ${oneLine(recordedInput)}. Actual input: ${oneLine(input)}.`
         : `the recording has no unused call of '${name}' to serve (${this.recordedCallsOf(name)}).`;
     let advice =
-      reason === "diverged"
+      kind === "diverged"
         ? " If the model took a different path, record that path. If your code changed how the step is called, " +
           "re-record, or replay mocked to test this change. If this input doesn't affect the step's output, " +
           "match it on name only (step_rules)."
         : " If the model took a different path, record that path. If your code added this call, re-record, or " +
           "replay mocked to test this change.";
-    const fault = this._fidelity!.firstFired;
-    if (fault && !this._liveModelSteps)
+    if (fault)
       advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
-        "call whose input now carries the error), so no recorded output can stand in for it. Replay live to run " +
-        "model steps for real, or record a trace of this path.";
+        "call whose input now carries the error), so no recorded output can stand in for it. " +
+        (this._liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.");
     const where = fault ? ` after an injected fault (${fault.description})` : "";
     const message =
       `${this._liveModelSteps ? "Live replay" : "Replay"} stopped at step ${position} ('${name}')${where}: ${detail} ` +

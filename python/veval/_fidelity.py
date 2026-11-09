@@ -34,11 +34,14 @@ class ReplayBinding:
 STOP = "stop"
 SERVE = "serve"
 
-# Why a live replay stopped:
+# Why a replay stopped:
 #   "diverged"     — the call's input matched no unused recording of its step, and the step stops on divergence.
 #   "no_recording" — the recording has no unused call of that step to serve, and it isn't a model step that can run live.
+#   "after_fault"  — an injected fault (ReplayOptions.faults) sent the agent off its recording: this call matches no
+#                    unused recording. Past the fault the recording can't say what the real step would return.
 STOP_DIVERGED = "diverged"
 STOP_NO_RECORDING = "no_recording"
+STOP_AFTER_FAULT = "after_fault"
 
 
 @dataclass
@@ -106,6 +109,8 @@ class ReplayFidelity:
         self._fired: list[int] = [0] * len(self._faults)
         # The first fault that fired, or None while none has.
         self._first_fired: Optional[ReplayFault] = None
+        # Recordings from this index on may go unused: a fault that fails every call fired there. None while none has.
+        self._unused_excused_from: Optional[int] = None
 
     @property
     def faulted(self) -> int:
@@ -119,8 +124,17 @@ class ReplayFidelity:
 
     def _fire(self, fault_index: int) -> None:
         self._fired[fault_index] += 1
+        fault = self._faults[fault_index]
         if self._first_fired is None:
-            self._first_fired = self._faults[fault_index]
+            self._first_fired = fault
+        if fault.count is not None or self._fired[fault_index] > 1:
+            return
+        # A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted
+        # step and everything after it may rightly go unused. Recordings before it were the agent's to call.
+        of_step = [u.recorded_index for u in self._unused if u.step_name == fault.step_name]
+        used = [b.recorded_index + 1 for b in self._bindings if b.recorded_index is not None]
+        start = min(of_step) if of_step else max(used, default=0)
+        self._unused_excused_from = start if self._unused_excused_from is None else min(self._unused_excused_from, start)
 
     @property
     def stop(self) -> Optional[ReplayStop]:
@@ -170,13 +184,7 @@ class ReplayFidelity:
         agent raised, since the exception already explains the rest."""
         if live_model_steps:
             return self._no_live_step_failure(trace_id)
-        return None if self._unused_recordings_expected else self._unused_failure(trace_id)
-
-    @property
-    def _unused_recordings_expected(self) -> bool:
-        """A fault that fails every call fired, so the agent took its fallback path and the rest of the recording may
-        legitimately go unused. A fault limited with times(n) is expected to rejoin the recording."""
-        return any(f.count is None and n > 0 for f, n in zip(self._faults, self._fired))
+        return self._unused_failure(trace_id)
 
     def _unfired_fault_failures(self, calls_of: Callable[[str], int]) -> list[str]:
         """One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing."""
@@ -193,12 +201,16 @@ class ReplayFidelity:
         return failures
 
     def _unused_failure(self, trace_id: str) -> Optional[str]:
-        """The failure for recorded steps that were never called, or None when every recording was used."""
-        if not self._unused:
+        """The failure for recorded steps that were never called, or None when every recording was used. After a fault
+        that fails every call, recordings from the faulted step on are excused: the agent took its fallback path. A
+        fault limited with times(n) is expected to rejoin the recording."""
+        start = self._unused_excused_from
+        unused = [u for u in self._unused if start is None or u.recorded_index < start]
+        if not unused:
             return None
-        steps = ", ".join(f"'{u.step_name}' (recorded step {u.recorded_index + 1})" for u in self._unused)
+        steps = ", ".join(f"'{u.step_name}' (recorded step {u.recorded_index + 1})" for u in unused)
         return (
-            f"Replay never called {len(self._unused)} recorded step(s) from trace {trace_id}: {steps}. "
+            f"Replay never called {len(unused)} recorded step(s) from trace {trace_id}: {steps}. "
             "The agent skipped part of the recorded run, so its assertions may be passing on a path the recording does not cover."
         )
 

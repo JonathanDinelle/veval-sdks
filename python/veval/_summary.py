@@ -29,25 +29,31 @@ def replay_summary(failures: list[str], stop: Optional[ReplayStop], fidelity: Op
 def scenario_summary(result: ScenarioRunResult) -> str:
     """The one-line summary on a scenario run result."""
     too_many_inconclusive = result.inconclusive_rate > result.max_inconclusive_rate
+    after_fault = result.inconclusive_after_fault_count
+    other_inconclusive = result.inconclusive_count - after_fault
     # The reason comes first: "failed ... 0 failed" would otherwise read like a bug.
     if result.passed:
         head = "passed"
+    elif result.fail_count == 0 and after_fault > 0:
+        head = "failed: inconclusive after a fault"
     elif result.fail_count == 0 and too_many_inconclusive:
         head = "failed: too many inconclusive"
     else:
         head = "failed"
     line = (
-        f"{head} — {result.pass_count} passed, {result.fail_count} failed, {result.inconclusive_count} inconclusive"
+        f"{head} — {result.pass_count} passed, {result.fail_count} failed, {other_inconclusive} inconclusive"
     )
-    if result.inconclusive_count > 0:
+    if other_inconclusive > 0:
         rate, allowed = _percent(result.inconclusive_rate), _percent(result.max_inconclusive_rate)
         line += (
             f" ({rate} of replays > {allowed} allowed)" if too_many_inconclusive
             else f" ({rate} of replays, within {allowed} allowed)"
         )
-    replayed = sum(1 for r in result.results if r.replayed)
+    if after_fault > 0:
+        line += f", {after_fault} inconclusive after a fault"
+    replayed = sum(1 for r in result.results if r.replayed and not r.inconclusive_after_fault)
     if replayed:
-        line += f", {replayed - result.inconclusive_count}/{replayed} replays stayed on path"
+        line += f", {replayed - other_inconclusive}/{replayed} replays stayed on path"
     return line
 
 

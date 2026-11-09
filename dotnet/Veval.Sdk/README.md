@@ -156,7 +156,7 @@ var result = await veval.ReplayAsync(trace, agent.ExecuteAsync, new ReplayOption
 });
 ```
 
-A fault that never fires fails the replay, and `result.Faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive.
+A fault that never fires fails the replay, and `result.Faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive (`ReplayStopReason.AfterFault`). `ReplayFault.Returns(step, value)` serves a value of your choice. A fault replaces the whole step, so it tests code around the step; if your retry catches your client's exception type, inject that type with `ReplayFault.Throw`. Scenarios take faults too: `ScenarioOptions.Faults` and `ScenarioItem.Faults`.
 
 ### Built-in Assertions
 

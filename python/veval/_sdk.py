@@ -283,6 +283,8 @@ class VevalSdk:
                         )
                         await report.send_trace_async(payload)
 
+            elif item.faults:
+                item_result.failures.append(_SYNTHETIC_ITEM_FAULTS_MESSAGE)
             elif item.input is not None:
                 ctx = await self._run_and_capture_context(scenario_name, agent, item.input, report)
                 item_result.failures.extend(await _evaluate(effective_assertions, ctx))
@@ -502,7 +504,14 @@ def _scenario_replay_options(
         live_model_steps=not mocked,
         assertions=assertions,
         step_rules=_merge_step_rules(options.step_rules, item.step_rules),
+        faults=[*options.faults, *item.faults],
     )
+
+
+_SYNTHETIC_ITEM_FAULTS_MESSAGE = (
+    "ScenarioItem.faults needs a trace-backed item (trace_id): faults replace recorded outputs, and a synthetic item "
+    "has none."
+)
 
 
 def _scenario_options(options: Optional[ScenarioOptions]) -> ScenarioOptions:

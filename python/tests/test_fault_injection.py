@@ -10,9 +10,10 @@ import pytest
 os.environ.setdefault("VEVAL_INTERNAL_ENDPOINT", "http://127.0.0.1:1")  # never reach the real API
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from veval._scenario_report import _run_payload  # noqa: E402
 from veval import (  # noqa: E402
-    FaultHttpError, MalformedValue, ReplayFault, ReplayOptions, StepData, StepOptions, StepType, TraceAssert,
-    TraceData, VevalOptions, VevalSdk,
+    FaultHttpError, ReplayFault, ReplayOptions, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
+    TraceAssert, TraceData, VevalOptions, VevalSdk, VevalTestSdk,
 )
 
 FLIGHTS = '["AF123","BA456"]'
@@ -135,7 +136,7 @@ def test_fallback_tool_not_in_recording_is_inconclusive_in_mocked_mode():
     assert result.outcome == "inconclusive"
     assert not result.passed
     assert result.inconclusive.step_name == "search_trains"
-    assert result.inconclusive.reason == "no_recording"
+    assert result.inconclusive.reason == "after_fault"
     assert result.inconclusive.message.startswith(
         "Replay stopped at step 2 ('search_trains') after an injected fault (HTTP 500 on 'search_flights')")
     assert result.status == "inconclusive"
@@ -152,7 +153,8 @@ def test_after_fault_model_call_carrying_the_error_is_inconclusive_in_mocked_mod
 
     assert result.outcome == "inconclusive"
     assert result.inconclusive.step_name == "summarize"
-    assert result.inconclusive.reason == "diverged"
+    assert result.inconclusive.reason == "after_fault"
+    assert "its input matches no unused recording of 'summarize'" in result.inconclusive.message
 
 
 def test_live_replay_model_step_after_fault_runs_live():
@@ -217,7 +219,7 @@ def test_truncated_output_is_half_the_recorded_json_then_guard_retries():
     assert outputs == ['["AF123"', FLIGHTS]
 
 
-def test_empty_and_value_malformed_outputs():
+def test_empty_and_returned_outputs():
     seen = []
 
     def run(ctx):
@@ -226,9 +228,40 @@ def test_empty_and_value_malformed_outputs():
         return ""
     sdk().replay(trace(), run, mocked(
         ReplayFault.malformed("search_flights", "empty").times(1),
-        ReplayFault.malformed("search_flights", MalformedValue(42)).times(1)))
+        ReplayFault.returns("search_flights", 42).times(1)))
 
     assert seen == ["", 42]
+
+
+def test_empty_on_a_step_whose_recording_is_not_text_is_none():
+    t = trace()
+    t.steps[0].output = ["AF123"]
+    seen = []
+
+    def run(ctx):
+        seen.append(ctx.track_step("search_flights", "Paris", lambda: ["live"]))
+        return ""
+    sdk().replay(t, run, mocked(ReplayFault.malformed("search_flights", "empty")))
+
+    assert seen == [None]
+
+
+def test_every_call_fault_still_fails_on_recordings_before_the_faulted_step():
+    t = trace()
+    t.steps.insert(0, recorded("load_profile", "Paris", "frequent flyer", "tool"))
+
+    # A regression drops load_profile; the fault on search_flights must not excuse it.
+    def run(ctx):
+        try:
+            return ctx.track_step("search_flights", "Paris", lambda: "live")
+        except FaultHttpError:
+            return "Search is down"
+    result = sdk().replay(t, run, mocked(ReplayFault.http_error("search_flights", 503)))
+
+    assert result.outcome == "failed"
+    assert len(result.failures) == 1
+    assert "never called 1 recorded step(s)" in result.failures[0]
+    assert "'load_profile' (recorded step 1)" in result.failures[0]
 
 
 def test_fault_that_never_fires_fails_the_replay():
@@ -289,5 +322,70 @@ def test_faults_without_mocked_or_live_replay_raise():
 def test_description_names_kind_step_and_scope():
     assert ReplayFault.http_error("book", 503).times(2).description == "HTTP 503 on 'book' (first 2 calls)"
     assert ReplayFault.rate_limit("llm").description == "Rate limit (429, Retry-After 1s) on 'llm'"
+    assert ReplayFault.returns("parse", 42).description == "Returned value on 'parse'"
     with pytest.raises(ValueError):
         ReplayFault.http_error("book", 200)
+
+
+# --- Faults in scenarios -------------------------------------------------------------------------------------------
+
+def replay_sdk():
+    return VevalTestSdk(VevalOptions(api_key="test")).with_replay(trace())
+
+
+
+
+def test_scenario_faults_apply_to_trace_backed_items_and_are_reported():
+    result = replay_sdk().run_scenario(
+        "travel", agent(1), [TraceAssert.max_attempts("search_flights", 1)],
+        [ScenarioItem(name="recovers", trace_id="tr_faults")],
+        ScenarioOptions(faults=[ReplayFault.timeout("search_flights").times(1)]))
+
+    assert result.passed, result.summary
+    assert [f.fired for f in result.results[0].faults] == [1]
+    assert _run_payload(result, "synthetic")["results"][0]["faults"] == [
+        {"description": "Timeout on 'search_flights' (first call)", "step_name": "search_flights", "fired": 1}]
+
+
+def test_scenario_item_faults_add_to_scenario_faults():
+    result = replay_sdk().run_scenario(
+        "travel", agent(2), [],
+        [ScenarioItem(trace_id="tr_faults", faults=[ReplayFault.http_error("search_flights", 503).times(1)])],
+        ScenarioOptions(faults=[ReplayFault.timeout("search_flights").times(1)]))
+
+    assert result.passed, result.summary
+    assert [f.fired for f in result.results[0].faults] == [1, 1]
+
+
+def test_scenario_inconclusive_after_fault_fails_the_run_whatever_the_allowance():
+    def run(ctx):
+        try:
+            return ctx.track_step("search_flights", "Paris", lambda: "live")
+        except FaultHttpError:
+            return ctx.track_step("search_trains", "Paris", lambda: "live", StepOptions(type=StepType.TOOL))
+    result = replay_sdk().run_scenario(
+        "travel", run, [],
+        [ScenarioItem(name="fallback", trace_id="tr_faults", faults=[ReplayFault.http_error("search_flights", 500)])],
+        ScenarioOptions(max_inconclusive_rate=1))
+
+    assert not result.passed
+    assert result.inconclusive_count == 1
+    assert result.inconclusive_after_fault_count == 1
+    assert result.inconclusive_rate == 0
+    assert result.stayed_on_path_rate is None
+    assert result.results[0].inconclusive_after_fault
+    assert result.summary == (
+        "failed: inconclusive after a fault — 0 passed, 0 failed, 0 inconclusive, 1 inconclusive after a fault")
+    payload = _run_payload(result, "synthetic")
+    assert payload["inconclusive_count"] == 1
+    assert payload["inconclusive_after_fault_count"] == 1
+    assert payload["results"][0]["inconclusive"]["reason"] == "after_fault"
+
+
+def test_scenario_synthetic_item_with_faults_fails():
+    result = replay_sdk().run_scenario(
+        "travel", agent(0), [],
+        [ScenarioItem(name="synthetic", input="Paris", faults=[ReplayFault.timeout("search_flights")])])
+
+    assert len(result.results[0].failures) == 1
+    assert "needs a trace-backed item" in result.results[0].failures[0]

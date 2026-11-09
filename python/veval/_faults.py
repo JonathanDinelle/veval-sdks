@@ -1,31 +1,27 @@
 from __future__ import annotations
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional
 
 # What a ReplayFault serves in place of a step's recorded output:
 #   "timeout"    — raises a TimeoutError.
 #   "http_error" — raises a FaultHttpError with the fault's status.
 #   "rate_limit" — raises a FaultHttpError with status 429 and a Retry-After header.
 #   "malformed"  — returns a malformed value instead of raising.
+#   "returns"    — returns a value you give instead of the recorded output (ReplayFault.returns).
 #   "custom"     — raises the exception the fault's factory builds.
 TIMEOUT = "timeout"
 HTTP_ERROR = "http_error"
 RATE_LIMIT = "rate_limit"
 MALFORMED = "malformed"
+RETURNS = "returns"
 CUSTOM = "custom"
 
 # A malformed output a ReplayFault.malformed fault returns:
 #   "truncated" — the step's recorded output as JSON text, cut in half. Needs an unused recording of the step.
-#   "empty"     — "" when the recorded output is text, None otherwise.
+#   "empty"     — "" for a step whose output is text (the recording holds text), None otherwise.
 TRUNCATED = "truncated"
 EMPTY = "empty"
-
-
-@dataclass(frozen=True)
-class MalformedValue:
-    """A malformed output given as a value, e.g. one of the wrong type: ReplayFault.malformed(step, MalformedValue(42))."""
-    value: Any
 
 
 class ReplayFault:
@@ -45,10 +41,10 @@ class ReplayFault:
         status: Optional[int] = None,
         retry_after_seconds: Optional[float] = None,
         malformed_output: Optional[str] = None,
-        malformed_value: Any = None,
+        value: Any = None,
         exception_factory: Optional[Callable[[], BaseException]] = None,
     ):
-        """Use the factory methods (ReplayFault.timeout, http_error, rate_limit, malformed, throw)."""
+        """Use the factory methods (ReplayFault.timeout, http_error, rate_limit, malformed, returns, throw)."""
         if not step_name:
             raise ValueError("A fault needs a step name.")
         self.step_name = step_name
@@ -57,9 +53,10 @@ class ReplayFault:
         self.status = status
         # The Retry-After of a rate_limit fault, in seconds.
         self.retry_after_seconds = retry_after_seconds
-        # What a malformed fault returns ("truncated" or "empty"), unless it returns malformed_value.
+        # What a malformed fault returns: "truncated" or "empty".
         self.malformed_output = malformed_output
-        self.malformed_value = malformed_value
+        # The value a returns fault returns.
+        self.value = value
         self._exception_factory = exception_factory
         self._count: Optional[int] = None
         self._from_call = 1
@@ -86,15 +83,19 @@ class ReplayFault:
         return ReplayFault(step_name, RATE_LIMIT, status=429, retry_after_seconds=retry_after_seconds)
 
     @staticmethod
-    def malformed(step_name: str, output: Union[str, MalformedValue]) -> ReplayFault:
+    def malformed(step_name: str, output: str) -> ReplayFault:
         """The step returns a malformed output instead of raising, so the guard that parses it runs: "truncated" or
-        "empty", or any other value (e.g. one of the wrong type) given as MalformedValue(value)."""
-        if isinstance(output, MalformedValue):
-            return ReplayFault(step_name, MALFORMED, malformed_value=output.value)
+        "empty"."""
         if output not in (TRUNCATED, EMPTY):
             raise ValueError(
-                f'A malformed output is "truncated", "empty" or MalformedValue(value), not {output!r}.')
+                f'A malformed output is "truncated" or "empty", not {output!r}. Use ReplayFault.returns for a value.')
         return ReplayFault(step_name, MALFORMED, malformed_output=output)
+
+    @staticmethod
+    def returns(step_name: str, value: Any) -> ReplayFault:
+        """The step returns this value instead of its recorded output: a value of the wrong type, or the value your
+        step returns when its own call fails (an error message, a fallback), to test the code that reads it."""
+        return ReplayFault(step_name, RETURNS, value=value)
 
     @staticmethod
     def throw(step_name: str, exception_factory: Callable[[], BaseException]) -> ReplayFault:
@@ -153,7 +154,9 @@ class ReplayFault:
         elif self.kind == RATE_LIMIT:
             kind = f"Rate limit (429, Retry-After {_format_seconds(self.retry_after_seconds or 0)}s)"
         elif self.kind == MALFORMED:
-            kind = f"Malformed output ({self.malformed_output or 'value'})"
+            kind = f"Malformed output ({self.malformed_output})"
+        elif self.kind == RETURNS:
+            kind = "Returned value"
         else:
             kind = "Custom exception"
         scope = []
@@ -182,7 +185,7 @@ class ReplayFault:
             if exception is None:
                 raise RuntimeError(f"The exception factory of the fault on '{self.step_name}' returned None.")
             return exception
-        raise RuntimeError(f"A {self.kind} fault doesn't raise.")
+        raise RuntimeError(f"A {self.kind} fault returns a value; it doesn't raise.")
 
 
 def _format_seconds(seconds: float) -> str:

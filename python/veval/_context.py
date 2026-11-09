@@ -3,9 +3,9 @@ import inspect
 import json
 from typing import Any, Callable, Awaitable, Optional, TypeVar, TYPE_CHECKING
 from ._step import Step, StepHandle, StepOptions
-from ._faults import EMPTY, MALFORMED, ReplayFault
+from ._faults import EMPTY, MALFORMED, RETURNS, ReplayFault
 from ._fidelity import (
-    DIVERGED, FAULTED, LIVE, MATCHED, STOP, STOP_DIVERGED, STOP_NO_RECORDING,
+    DIVERGED, FAULTED, LIVE, MATCHED, STOP, STOP_AFTER_FAULT, STOP_DIVERGED, STOP_NO_RECORDING,
     ReplayBinding, ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStoppedError, UnusedRecording,
 )
 from ._snapshots import _canonicalize
@@ -287,7 +287,7 @@ class VevalExecutionContext:
         s.metadata["_fault"] = fault.description
         self._steps.append(s)
 
-        if fault.kind != MALFORMED:
+        if fault.kind not in (MALFORMED, RETURNS):
             exception = fault._create_exception()
             s.fail(str(exception))
             raise exception
@@ -301,8 +301,8 @@ class VevalExecutionContext:
         return value
 
     def _malformed_output_of(self, fault: ReplayFault, name: str, input: Any, rule: Optional[ReplayStepRule]) -> Any:
-        if fault.malformed_output is None:
-            return fault.malformed_value
+        if fault.kind == RETURNS:
+            return fault.value
         recorded, _ = self._find_recording(name, input, rule)
         output = recorded.data.output if recorded is not None else None
         if fault.malformed_output == EMPTY:
@@ -310,7 +310,7 @@ class VevalExecutionContext:
         if recorded is None:
             raise RuntimeError(
                 f"Fault on '{name}': there is no unused recording of the step to truncate. "
-                "Give the malformed value yourself instead.")
+                "Give the value with ReplayFault.returns instead.")
         text = output if isinstance(output, str) else json.dumps(output, default=str, ensure_ascii=False, separators=(",", ":"))
         return text[: len(text) // 2]
 
@@ -342,12 +342,17 @@ class VevalExecutionContext:
         return recorded_type is not None and recorded_type in self._stop_on_divergence_types
 
     def _stop_at(
-        self, name: str, reason: str, recorded_input: Any, input: Any, recorded_type: Optional[str],
+        self, name: str, kind: str, recorded_input: Any, input: Any, recorded_type: Optional[str],
     ) -> ReplayStoppedError:
-        """Stops a live replay at this call: records the stop and a failed step for it, and returns the error that
-        ends the run."""
+        """Stops a replay at this call: records the stop and a stopped step for it, and returns the error that ends
+        the run. kind says whether the step had unused recordings with other inputs ("diverged") or none
+        ("no_recording"). Once a fault has fired, the stop's reason is "after_fault": the fault, not the agent, sent
+        the run off its recording."""
         position = len(self._steps) + 1
-        if reason == STOP_DIVERGED:
+        assert self._fidelity is not None
+        fault = self._fidelity._first_fired
+        reason = STOP_AFTER_FAULT if fault is not None else kind
+        if kind == STOP_DIVERGED:
             detail = (
                 f"its input matches no unused recording of '{name}', so what the real step would return is unknown. "
                 f"Recorded input: {_one_line(recorded_input)}. Actual input: {_one_line(input)}."
@@ -363,13 +368,12 @@ class VevalExecutionContext:
                 " If the model took a different path, record that path. If your code added this call, re-record, or "
                 "replay mocked to test this change."
             )
-        assert self._fidelity is not None
-        fault = self._fidelity._first_fired
-        if fault is not None and not self._live_model_steps:
+        if fault is not None:
             advice = (
                 " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a "
-                "call whose input now carries the error), so no recorded output can stand in for it. Replay live to run "
-                "model steps for real, or record a trace of this path."
+                "call whose input now carries the error), so no recorded output can stand in for it. "
+                + ("Record a trace of this path." if self._live_model_steps
+                   else "Replay live to run model steps for real, or record a trace of this path.")
             )
         where = f" after an injected fault ({fault.description})" if fault is not None else ""
         message = (
