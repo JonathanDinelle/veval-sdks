@@ -86,6 +86,7 @@ class TraceData:
 
 # Snapshot types live in _snapshots; re-exported here for existing imports.
 from ._fidelity import ReplayFidelity, ReplayStepRule, ReplayStop  # noqa: E402
+from ._faults import FaultReport, ReplayFault  # noqa: E402
 from ._snapshots import (  # noqa: E402
     SnapshotStep,
     SnapshotData,
@@ -117,6 +118,12 @@ class ReplayOptions:
     # the recording can't say what the real tool would have returned. Defaults to {"tool"}; other diverged steps are
     # served the next unused recording and reported in ReplayResult.fidelity.
     stop_on_divergence_types: set[str] = field(default_factory=lambda: {"tool"})
+    # Failures to serve instead of recorded outputs: a timeout, an HTTP error, a rate limit, a malformed output or a
+    # custom exception (ReplayFault), so the replay runs the agent's retries, fallbacks and guards. Needs a mocked or
+    # live replay. Once a fault has fired, a call that matches no unused recording stops the replay inconclusive
+    # instead of being served a recording from another path; in a live replay, model steps still run live, so the
+    # model's reaction to the error is tested. A fault that never fires fails the replay.
+    faults: list[ReplayFault] = field(default_factory=list)
 
 
 @dataclass
@@ -148,6 +155,11 @@ class ReplayResult:
     def passed(self) -> bool:
         """True only when the replay passed; False when it failed or was inconclusive."""
         return self.outcome == "passed"
+
+    @property
+    def faults(self) -> list[FaultReport]:
+        """Each fault in ReplayOptions.faults and how many times it fired, in declared order."""
+        return self.fidelity.faults if self.fidelity is not None else []
 
     @property
     def summary(self) -> str:

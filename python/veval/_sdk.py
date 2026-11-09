@@ -283,6 +283,8 @@ class VevalSdk:
                         )
                         await report.send_trace_async(payload)
 
+            elif item.faults:
+                item_result.failures.append(_SYNTHETIC_ITEM_FAULTS_MESSAGE)
             elif item.input is not None:
                 ctx = await self._run_and_capture_context(scenario_name, agent, item.input, report)
                 item_result.failures.extend(await _evaluate(effective_assertions, ctx))
@@ -417,9 +419,16 @@ def _require_no_running_loop(async_name: str) -> None:
 
 
 def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionContext:
+    if options.faults and not options.mock_llm_responses and not options.live_model_steps:
+        raise ValueError(
+            "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.")
     ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
     ctx._is_replay = True
-    rules = {"step_rules": options.step_rules, "stop_on_divergence_types": options.stop_on_divergence_types}
+    rules = {
+        "step_rules": options.step_rules,
+        "stop_on_divergence_types": options.stop_on_divergence_types,
+        "faults": options.faults,
+    }
     if options.live_model_steps:
         ctx.load_mock_outputs(trace, live_model_steps=True, **rules)
     elif options.mock_llm_responses:
@@ -457,6 +466,8 @@ def _replay_result(
         binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
         if binding_failure:
             failures.append(binding_failure)
+        if fidelity is not None:
+            failures.extend(fidelity._unfired_fault_failures(lambda name: sum(1 for s in ctx.steps if s.name == name)))
         failures.extend(assertion_failures)
 
         if options.compare_with_recording is not None:
@@ -493,7 +504,14 @@ def _scenario_replay_options(
         live_model_steps=not mocked,
         assertions=assertions,
         step_rules=_merge_step_rules(options.step_rules, item.step_rules),
+        faults=[*options.faults, *item.faults],
     )
+
+
+_SYNTHETIC_ITEM_FAULTS_MESSAGE = (
+    "ScenarioItem.faults needs a trace-backed item (trace_id): faults replace recorded outputs, and a synthetic item "
+    "has none."
+)
 
 
 def _scenario_options(options: Optional[ScenarioOptions]) -> ScenarioOptions:

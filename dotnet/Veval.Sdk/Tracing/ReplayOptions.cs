@@ -38,4 +38,13 @@ public class ReplayOptions
     /// diverged steps are served the next unused recording and reported in <see cref="ReplayResult.Fidelity"/>.
     /// </summary>
     public ISet<string> StopOnDivergenceTypes { get; set; } = new HashSet<string> { "tool" };
+
+    /// <summary>
+    /// Failures to serve instead of recorded outputs: a timeout, an HTTP error, a rate limit, a malformed output or a
+    /// custom exception (<see cref="ReplayFault"/>), so the replay runs the agent's retries, fallbacks and guards.
+    /// Needs a mocked or live replay. Once a fault has fired, a call that matches no unused recording stops the
+    /// replay inconclusive instead of being served a recording from another path; in a live replay, model steps
+    /// still run live, so the model's reaction to the error is tested. A fault that never fires fails the replay.
+    /// </summary>
+    public List<ReplayFault> Faults { get; set; } = new();
 }

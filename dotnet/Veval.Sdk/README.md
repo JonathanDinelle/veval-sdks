@@ -145,14 +145,28 @@ if (!result.Passed)
 
 In replay, `TrackStepAsync` returns the recorded output instead of running your code. Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `result.Fidelity`. A step with no recorded output throws rather than silently making a live call, and a recorded step the agent never calls fails the replay. To replay your production entry point unchanged, use `new VevalTestSdk(options).WithReplay(trace)` and call your agent as usual.
 
+To test failure paths, add faults to `ReplayOptions.Faults`: replay serves a timeout, an HTTP error, a rate limit, a malformed output or your own exception in place of a step's recorded output, so retries, fallbacks and guards run.
+
+```csharp
+var result = await veval.ReplayAsync(trace, agent.ExecuteAsync, new ReplayOptions
+{
+    MockLlmResponses = true,
+    Faults = { ReplayFault.Timeout("search_flights").Times(1) },   // fail once, then serve the recording
+    Assertions = [TraceAssert.MaxAttempts("search_flights", 2)],
+});
+```
+
+A fault that never fires fails the replay, and `result.Faults` says how many times each fired. After a fault, a mocked replay serves only calls that still match their recording; any other call stops it as inconclusive (`ReplayStopReason.AfterFault`). `ReplayFault.Returns(step, value)` serves a value of your choice. A fault replaces the whole step, so it tests code around the step; if your retry catches your client's exception type, inject that type with `ReplayFault.Throw`. Scenarios take faults too: `ScenarioOptions.Faults` and `ScenarioItem.Faults`.
+
 ### Built-in Assertions
 
 | Assertion | Description |
 |-----------|-------------|
-| `TraceAssert.NoErrors()` | No step has error status |
+| `TraceAssert.NoErrors()` | No step has error status (injected faults aside) |
 | `TraceAssert.MaxSteps(n)` | Total step count <= n |
 | `TraceAssert.StepExists("name")` | A step with this name exists |
 | `TraceAssert.ToolCalled("name")` | A step of type `tool` with this name exists |
+| `TraceAssert.MaxAttempts("name", n)` | At most n calls of the step after its first failure (an error or an injected fault) |
 | `TraceAssert.MaxCost(decimal)` | Total cost across all steps <= threshold |
 | `TraceAssert.MaxDuration(ms)` | Total duration across all steps <= threshold |
 | `TraceAssert.OutputContains("text")` | At least one step output contains the text |

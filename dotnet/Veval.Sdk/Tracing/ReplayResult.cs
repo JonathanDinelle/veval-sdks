@@ -38,6 +38,9 @@ public class ReplayResult
     /// </summary>
     public ReplayFidelity? Fidelity { get; set; }
 
+    /// <summary>Each fault in <see cref="ReplayOptions.Faults"/> and how many times it fired, in declared order.</summary>
+    public IReadOnlyList<FaultReport> Faults => Fidelity?.Faults ?? Array.Empty<FaultReport>();
+
     /// <summary>One line, e.g. <c>passed — 40/64 recorded steps used, 3 diverged but served, 12 live, stayed on path</c>.</summary>
     public string Summary => Internal.ResultSummary.ForReplay(Failures, Inconclusive, Fidelity);
 }

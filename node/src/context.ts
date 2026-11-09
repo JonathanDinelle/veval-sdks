@@ -2,6 +2,7 @@ import { Step, StepHandle, StepOptions } from "./step";
 import { StepData, TraceData } from "./tracing";
 import { ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStopReason, ReplayStoppedError } from "./fidelity";
 import { canonicalize } from "./snapshots";
+import { ReplayFault } from "./faults";
 
 export interface JudgeRecord {
   criteria: string;
@@ -73,6 +74,12 @@ function oneLine(value: unknown): string {
 export interface StepBindingOptions {
   step_rules?: Record<string, ReplayStepRule>;
   stop_on_divergence_types?: string[];
+  faults?: ReplayFault[];
+}
+
+/** Whether replay served this step an injected fault (`ReplayOptions.faults`). @internal */
+export function isInjectedFault(step: Step): boolean {
+  return step.metadata["_source"] === "fault";
 }
 
 export class VevalExecutionContext {
@@ -88,6 +95,7 @@ export class VevalExecutionContext {
   private _stepRules: Record<string, ReplayStepRule> = {};
   private _stopOnDivergenceTypes = new Set<string>();
   private _isReplay = false;
+  private _callCounts = new Map<string, number>();
 
   constructor(traceId: string, input: unknown) {
     this.traceId = traceId;
@@ -142,6 +150,11 @@ export class VevalExecutionContext {
       if (stopped) throw new ReplayStoppedError(stopped);
 
       const rule = Object.prototype.hasOwnProperty.call(this._stepRules, name) ? this._stepRules[name] : undefined;
+      const call = (this._callCounts.get(name) ?? 0) + 1;
+      this._callCounts.set(name, call);
+      const faultIndex = this.faultFor(name, input, call, rule);
+      if (faultIndex !== null) return this.serveFault<T>(name, input, faultIndex, rule, declaredType);
+
       const { recorded, exact } = this.findRecording(name, input, rule);
       const recordedType = recorded?.data.type ?? this.recordedTypeOf(name);
       // A recorded llm or tool type wins; a recorded custom type is what an untyped step is saved as, so it says
@@ -152,6 +165,11 @@ export class VevalExecutionContext {
       // model steps the recording never contained.
       const runLive = this._liveModelSteps && effectiveType === "llm";
       const conflictingType = knownType && declaredType && declaredType !== knownType ? declaredType : null;
+
+      // After a fault, a mocked replay serves only calls that still match their recording: a fallback the
+      // recording never called, or a model call whose prompt now carries the error, has no truthful output.
+      if (!this._liveModelSteps && this._fidelity!.firstFired !== null && (recorded === null || !exact))
+        throw this.stopAt(name, recorded === null ? "no_recording" : "diverged", recorded?.data.input ?? null, input, effectiveType);
 
       if (recorded === null && !runLive && this._strictMockMode) {
         if (this._liveModelSteps) throw this.stopAt(name, "no_recording", null, input, effectiveType);
@@ -234,7 +252,75 @@ export class VevalExecutionContext {
       consumed: false,
       keysIgnoring: new Map<string, string>(),
     }));
-    this._fidelity = new ReplayFidelity(this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })));
+    this._fidelity = new ReplayFidelity(
+      this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })), options?.faults ?? []);
+  }
+
+  /** The index of the first declared fault that applies to this call of the step, or null. */
+  private faultFor(name: string, input: unknown, call: number, rule: ReplayStepRule | undefined): number | null {
+    const faults = this._fidelity!.declaredFaults;
+    for (let i = 0; i < faults.length; i++) {
+      const fault = faults[i];
+      if (fault.step_name !== name || call < fault.from_call) continue;
+      if (fault.count !== null && this._fidelity!.firedCount(i) >= fault.count) continue;
+      if (fault.has_input) {
+        const ignore = new Set(rule?.ignore_input_fields ?? []);
+        if (ignoringKey(fault.input, ignore) !== ignoringKey(input, ignore)) continue;
+      }
+      return i;
+    }
+    return null;
+  }
+
+  /**
+   * Serves a fault at this call: records it as a step with `_source = "fault"` and either throws the fault's error or
+   * returns its malformed output. The call uses up no recording, so a retry is served the recorded one.
+   */
+  private serveFault<T>(
+    name: string, input: unknown, faultIndex: number, rule: ReplayStepRule | undefined, declaredType: string | null
+  ): T {
+    const fidelity = this._fidelity!;
+    const fault = fidelity.declaredFaults[faultIndex];
+    fidelity.fired(faultIndex);
+    fidelity.record({ step_name: name, kind: "faulted", recorded_index: null, recorded_input: null, actual_input: input });
+
+    const recordedType = this.recordedTypeOf(name);
+    const type = !recordedType || recordedType === "custom" ? declaredType ?? recordedType : recordedType;
+    const s = new Step(name);
+    s.input = input;
+    s.type = type ?? "custom";
+    s.metadata["_source"] = "fault";
+    s.metadata["_fault"] = fault.description;
+    this._steps.push(s);
+
+    if (fault.kind !== "malformed" && fault.kind !== "returns") {
+      const error = fault.createError();
+      s.fail(error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+
+    let value: unknown;
+    try {
+      value = this.malformedOutputOf(fault, name, input, rule);
+    } catch (err) {
+      s.fail(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    s.complete(value);
+    return value as T;
+  }
+
+  private malformedOutputOf(fault: ReplayFault, name: string, input: unknown, rule: ReplayStepRule | undefined): unknown {
+    if (fault.kind === "returns") return fault.value;
+    const { recorded } = this.findRecording(name, input, rule);
+    const output = recorded?.data.output;
+    if (fault.malformed_output === "empty") return typeof output === "string" ? "" : null;
+    if (!recorded)
+      throw new Error(
+        `Fault on '${name}': there is no unused recording of the step to truncate. Give the value with ReplayFault.returns instead.`
+      );
+    const text = typeof output === "string" ? output : JSON.stringify(output ?? null);
+    return text.substring(0, Math.floor(text.length / 2));
   }
 
   /**
@@ -261,25 +347,36 @@ export class VevalExecutionContext {
     return !!recordedType && this._stopOnDivergenceTypes.has(recordedType);
   }
 
-  /** Stops a live replay at this call: records the stop and a failed step for it, and returns the error that ends the run. */
+  /**
+   * Stops a replay at this call: records the stop and a stopped step for it, and returns the error that ends the run.
+   * `kind` says whether the step had unused recordings with other inputs ("diverged") or none ("no_recording"). Once a
+   * fault has fired, the stop's reason is "after_fault": the fault, not the agent, sent the run off its recording.
+   */
   private stopAt(
-    name: string, reason: ReplayStopReason, recordedInput: unknown, input: unknown, recordedType: string | null | undefined
+    name: string, kind: "diverged" | "no_recording", recordedInput: unknown, input: unknown, recordedType: string | null | undefined
   ): ReplayStoppedError {
     const position = this._steps.length + 1;
+    const fault = this._fidelity!.firstFired;
+    const reason: ReplayStopReason = fault ? "after_fault" : kind;
     const detail =
-      reason === "diverged"
+      kind === "diverged"
         ? `its input matches no unused recording of '${name}', so what the real step would return is unknown. ` +
           `Recorded input: ${oneLine(recordedInput)}. Actual input: ${oneLine(input)}.`
         : `the recording has no unused call of '${name}' to serve (${this.recordedCallsOf(name)}).`;
-    const advice =
-      reason === "diverged"
+    let advice =
+      kind === "diverged"
         ? " If the model took a different path, record that path. If your code changed how the step is called, " +
           "re-record, or replay mocked to test this change. If this input doesn't affect the step's output, " +
           "match it on name only (step_rules)."
         : " If the model took a different path, record that path. If your code added this call, re-record, or " +
           "replay mocked to test this change.";
+    if (fault)
+      advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
+        "call whose input now carries the error), so no recorded output can stand in for it. " +
+        (this._liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.");
+    const where = fault ? ` after an injected fault (${fault.description})` : "";
     const message =
-      `Live replay stopped at step ${position} ('${name}'): ${detail} ` +
+      `${this._liveModelSteps ? "Live replay" : "Replay"} stopped at step ${position} ('${name}')${where}: ${detail} ` +
       "The replay is inconclusive: it neither passed nor failed." + advice;
 
     const stop: ReplayStop = {

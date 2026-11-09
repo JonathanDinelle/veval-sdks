@@ -15,6 +15,7 @@ from ._fidelity import (
     ReplayStop,
     ReplayStoppedError,
 )
+from ._faults import ReplayFault, FaultHttpError, FaultReport
 from ._snapshots import (
     SnapshotStep,
     SnapshotData,
@@ -56,6 +57,9 @@ __all__ = [
     "ReplayStepRule",
     "ReplayStop",
     "ReplayStoppedError",
+    "ReplayFault",
+    "FaultHttpError",
+    "FaultReport",
     "ITraceAssertion",
     "TraceAssert",
     "ScenarioItem",

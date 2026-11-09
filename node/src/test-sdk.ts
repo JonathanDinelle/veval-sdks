@@ -1,5 +1,5 @@
 import { VevalOptions } from "./options";
-import { VevalSdk, missingTraceMessage, scenarioReplayOptions } from "./sdk";
+import { VevalSdk, missingTraceMessage, scenarioReplayOptions, SYNTHETIC_ITEM_FAULTS_MESSAGE } from "./sdk";
 import { VevalExecutionContext } from "./context";
 import { TraceData, ReplayOptions } from "./tracing";
 import { SnapshotData } from "./snapshots";
@@ -166,6 +166,9 @@ export class VevalTestSdk extends VevalSdk {
             await report.sendTraceAsync(payload);
           }
         }
+      } else if ((item.faults?.length ?? 0) > 0) {
+        itemResult.failures.push(SYNTHETIC_ITEM_FAULTS_MESSAGE);
+        itemResult.passed = false;
       } else if (item.input !== undefined) {
         const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, item.input);
         try {

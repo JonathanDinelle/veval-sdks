@@ -22,4 +22,10 @@ public class ScenarioItem
     /// the same step.
     /// </summary>
     public Dictionary<string, ReplayStepRule> StepRules { get; set; } = new();
+
+    /// <summary>
+    /// For a trace-backed item: <see cref="ReplayOptions.Faults"/> for its replay, added after the scenario's
+    /// <see cref="ScenarioOptions.Faults"/>. A synthetic item (no <see cref="TraceId"/>) can't take faults and fails.
+    /// </summary>
+    public List<ReplayFault> Faults { get; set; } = new();
 }
