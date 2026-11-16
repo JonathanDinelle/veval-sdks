@@ -7,10 +7,30 @@ public enum ReplayBindingKind
     Matched,
     /// <summary>No recorded step with that name had an identical input; served the next unused one in recorded order.</summary>
     Diverged,
-    /// <summary>A model step that ran for real in a live replay (<see cref="ReplayOptions.LiveModelSteps"/>).</summary>
+    /// <summary>
+    /// A step that ran for real: a model step in a live replay (<see cref="ReplayOptions.LiveModelSteps"/>), or a tool
+    /// step in a tool-live replay (<see cref="ReplayOptions.LiveToolSteps"/>).
+    /// </summary>
     Live,
     /// <summary>Served an injected fault (<see cref="ReplayOptions.Faults"/>) instead of running or using a recording.</summary>
     Faulted,
+    /// <summary>
+    /// Tool-live replay: a tool marked <see cref="ReplayStepRule.ReadsExternalState"/>, served from the recording
+    /// instead of running. Its output was not checked.
+    /// </summary>
+    NotReplayed,
+}
+
+/// <summary>
+/// Tool-live replay: one tool that ran for real, with its recorded and new outputs. <see cref="Changed"/> when they
+/// differ (key order and the step rule's <see cref="ReplayStepRule.IgnoreOutputFields"/> aside).
+/// </summary>
+/// <param name="RecordedIndex">The 0-based position of the recording the call was compared with.</param>
+/// <param name="ActualOutput">The new output, or the error message when the tool threw.</param>
+public record ToolOutputCheck(string StepName, int RecordedIndex, object? RecordedOutput, object? ActualOutput, bool Changed)
+{
+    /// <summary>The failure for a changed output; null when the output matched.</summary>
+    public string? Message { get; init; }
 }
 
 /// <summary>
@@ -40,12 +60,26 @@ public class ReplayFidelity
     private readonly List<ReplayFault> _faults;
     private readonly int[] _fired;
 
-    internal ReplayFidelity(IEnumerable<UnusedRecording> recorded, IReadOnlyList<ReplayFault>? faults = null)
+    private readonly List<ToolOutputCheck> _toolChecks = new();
+
+    internal ReplayFidelity(IEnumerable<UnusedRecording> recorded, IReadOnlyList<ReplayFault>? faults = null, bool liveToolSteps = false)
     {
+        LiveToolSteps = liveToolSteps;
         _unused = recorded.ToList();
         _faults = faults?.ToList() ?? new List<ReplayFault>();
         _fired = new int[_faults.Count];
     }
+
+    /// <summary>The replay runs tools for real (<see cref="ReplayOptions.LiveToolSteps"/>).</summary>
+    public bool LiveToolSteps { get; }
+    /// <summary>Tool-live replay: each tool that ran for real and how its output compared, in call order.</summary>
+    public IReadOnlyList<ToolOutputCheck> ToolChecks => _toolChecks;
+    /// <summary>Tool-live replay: the tools whose new output differs from the recording.</summary>
+    public IReadOnlyList<ToolOutputCheck> ToolOutputChanges => _toolChecks.Where(c => c.Changed).ToList();
+    /// <summary>Tool-live replay: tools served from the recording because they read external state.</summary>
+    public int NotReplayed => _bindings.Count(b => b.Kind == ReplayBindingKind.NotReplayed);
+
+    internal void Checked(ToolOutputCheck check) => _toolChecks.Add(check);
 
     /// <summary>Each replayed call, in call order.</summary>
     public IReadOnlyList<ReplayBinding> Bindings => _bindings;
@@ -112,7 +146,16 @@ public class ReplayFidelity
     /// agent threw, since the exception already explains the rest.
     /// </summary>
     internal string? Failure(string traceId, bool liveModelSteps) =>
-        liveModelSteps ? NoLiveStepFailure(traceId) : UnusedFailure(traceId);
+        liveModelSteps ? NoLiveStepFailure(traceId)
+        : LiveToolSteps ? NoToolRanFailure(traceId) ?? UnusedFailure(traceId)
+        : UnusedFailure(traceId);
+
+    /// <summary>The failure for a tool-live replay in which no tool ran, or null when at least one did.</summary>
+    internal string? NoToolRanFailure(string traceId) => _toolChecks.Count > 0 ? null :
+        $"Tool-live replay of trace {traceId} ran no tool: none of the steps it called was recorded as type 'tool' " +
+        (NotReplayed > 0 ? $"except {NotReplayed} that read external state, " : "") +
+        "so no tool output was checked. Mark tool steps with StepOptions.Type = StepType.Tool (or SetMeta(\"type\", \"tool\")) " +
+        "and record a new trace.";
 
     /// <summary>One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing.</summary>
     internal IEnumerable<string> UnfiredFaultFailures(Func<string, int> callsOf) =>

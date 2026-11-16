@@ -5,7 +5,8 @@ from typing import Any, Callable, Awaitable, Optional, TypeVar, TYPE_CHECKING
 from ._step import Step, StepHandle, StepOptions
 from ._faults import EMPTY, MALFORMED, RETURNS, ReplayFault
 from ._fidelity import (
-    DIVERGED, FAULTED, LIVE, MATCHED, STOP, STOP_AFTER_FAULT, STOP_DIVERGED, STOP_NO_RECORDING, RecordedStepError,
+    DIVERGED, FAULTED, LIVE, MATCHED, NOT_REPLAYED, STOP, STOP_AFTER_FAULT, STOP_DIVERGED, STOP_NO_RECORDING,
+    RecordedStepError, ToolOutputCheck,
     ReplayBinding, ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStoppedError, UnusedRecording,
 )
 from ._snapshots import _canonicalize
@@ -58,6 +59,7 @@ class VevalExecutionContext:
         self._fidelity: Optional[ReplayFidelity] = None
         self._strict_mock_mode = False
         self._live_model_steps = False
+        self._live_tool_steps = False
         self._step_rules: dict[str, ReplayStepRule] = {}
         self._stop_on_divergence_types: set[str] = set()
         self._is_replay = False
@@ -103,54 +105,95 @@ class VevalExecutionContext:
         options: Optional[StepOptions] = None,
     ) -> T:
         """options: settings known before the step runs, such as its type (StepOptions.type)."""
-        served, output, step_type = self._serve_from_recording(name, input, options)
+        served, output, step_type, tool = self._serve_from_recording(name, input, options)
         if served:
             return output
 
-        s, handle = self._start_step(name, input, step_type)
+        s, handle = self._start_step(name, input, step_type, tool)
         try:
             result = await (step(handle) if _takes_handle(step) else step())
-            s.complete(result)
-            return result
         except Exception as ex:
             s.fail(str(ex))
+            self._check_tool_failure(name, tool, str(ex))
             raise
+        s.complete(result)
+        self._check_tool_output(name, tool, result)
+        return result
 
     def track_step(
         self, name: str, input: Any, step: Callable[..., T], options: Optional[StepOptions] = None,
     ) -> T:
         """Synchronous track_step_async, for a step whose work is a plain function. Replays the same way."""
-        served, output, step_type = self._serve_from_recording(name, input, options)
+        served, output, step_type, tool = self._serve_from_recording(name, input, options)
         if served:
             return output
 
-        s, handle = self._start_step(name, input, step_type)
+        s, handle = self._start_step(name, input, step_type, tool)
         try:
             result = _not_awaitable(step(handle) if _takes_handle(step) else step(), "track_step_async")
-            s.complete(result)
-            return result
         except Exception as ex:
             s.fail(str(ex))
+            self._check_tool_failure(name, tool, str(ex))
             raise
+        s.complete(result)
+        self._check_tool_output(name, tool, result)
+        return result
 
-    def _start_step(self, name: str, input: Any, step_type: Optional[str]) -> tuple[Step, StepHandle]:
+    def _start_step(
+        self, name: str, input: Any, step_type: Optional[str], tool: Optional[_ToolRun] = None,
+    ) -> tuple[Step, StepHandle]:
         s = Step(name)
         s.input = input
         s.type = step_type or "custom"
+        if tool is not None:
+            s.metadata["_source"] = "live_tool"
         self._steps.append(s)
         return s, StepHandle(s)
 
+    def _check_tool_output(self, name: str, tool: Optional[_ToolRun], result: Any) -> None:
+        """Tool-live replay: compares a tool's new output with its recording. The agent gets the new output either way,
+        so the code that reads it runs too; a difference is recorded and fails the replay."""
+        if tool is None:
+            return
+        recorded, rule = tool
+        failed = recorded.data.status == "error"
+        recorded_output = recorded.data.error if failed else recorded.data.output
+        ignore = tuple(sorted(rule.ignore_output_fields)) if rule is not None else ()
+        changed = failed or _ignoring_key(result, ignore) != _ignoring_key(recorded_output, ignore)
+        how = (f"returned {_one_line(result)} where the recording failed ({recorded_output})" if failed
+               else f"returned {_one_line(result)} instead of {_one_line(recorded_output)}")
+        self._check_tool(name, recorded, recorded_output, result, changed, how)
+
+    def _check_tool_failure(self, name: str, tool: Optional[_ToolRun], error: str) -> None:
+        """Tool-live replay: a tool that raised. A change unless the recorded call failed too."""
+        if tool is None:
+            return
+        recorded, _ = tool
+        failed = recorded.data.status == "error"
+        recorded_output = recorded.data.error if failed else recorded.data.output
+        self._check_tool(name, recorded, recorded_output, error, not failed,
+                         f"raised ({error}) where the recording returned {_one_line(recorded_output)}")
+
+    def _check_tool(self, name: str, recorded: _RecordedStep, recorded_output: Any, actual: Any, changed: bool, how: str) -> None:
+        assert self._fidelity is not None
+        self._fidelity._checked(ToolOutputCheck(
+            name, recorded.index, recorded_output, actual, changed,
+            f"Tool output changed: '{name}' (recorded step {recorded.index + 1}) ran with its recorded input and {how}."
+            if changed else None,
+        ))
+
     def _serve_from_recording(
         self, name: str, input: Any, options: Optional[StepOptions],
-    ) -> tuple[bool, Any, Optional[str]]:
-        """In a replay, binds the call to a recording. Returns (True, recorded output, type) when the step is served
-        from the recording, or (False, None, type) when it should run. type is the step's type: the recorded one,
-        else the call site's."""
+    ) -> tuple[bool, Any, Optional[str], Optional[_ToolRun]]:
+        """In a replay, binds the call to a recording. Returns (True, recorded output, type, None) when the step is
+        served from the recording, or (False, None, type, tool) when it should run. type is the step's type: the
+        recorded one, else the call site's. tool is set in a tool-live replay when the step is a tool to run and compare
+        with its recording."""
         if options is not None and not isinstance(options, StepOptions):
             raise TypeError(f"track_step options must be a StepOptions, not {type(options).__name__}")
         declared_type = options.type if options is not None else None
         if self._recorded is None:
-            return False, None, declared_type
+            return False, None, declared_type, None
         assert self._fidelity is not None
         # Once a live replay has stopped, nothing after it can be served truthfully, even if the agent caught the stop.
         if self._fidelity.stop is not None:
@@ -163,7 +206,7 @@ class VevalExecutionContext:
         self._call_counts[name] = call
         fault_index = self._fault_for(name, input, call, rule)
         if fault_index is not None:
-            return True, self._serve_fault(name, input, fault_index, rule, declared_type), None
+            return True, self._serve_fault(name, input, fault_index, rule, declared_type), None, None
 
         recorded, exact = self._find_recording(name, input, rule)
         recorded_type = recorded.data.type if recorded is not None else self._recorded_type_of(name)
@@ -174,6 +217,9 @@ class VevalExecutionContext:
         # In live mode a model step runs for real, including extra calls of a step recorded as a model step and
         # model steps the recording never contained.
         run_live = self._live_model_steps and effective_type == "llm"
+        # In tool-live mode a tool runs for real against its recorded input; one that reads external state can't.
+        run_tool = (self._live_tool_steps and effective_type == "tool"
+                    and not (rule is not None and rule.reads_external_state))
         conflicting_type = (
             declared_type if known_type and declared_type and declared_type != known_type else None
         )
@@ -187,7 +233,7 @@ class VevalExecutionContext:
                 recorded.data.input if recorded is not None else None, input, effective_type)
 
         if recorded is None and not run_live and self._strict_mock_mode:
-            if self._live_model_steps:
+            if self._live_model_steps or self._live_tool_steps:
                 raise self._stop_at(name, STOP_NO_RECORDING, None, input, effective_type)
             available = ", ".join(dict.fromkeys(r.data.name for r in self._recorded if not r.consumed))
             raise RuntimeError(
@@ -200,6 +246,9 @@ class VevalExecutionContext:
         if (self._live_model_steps and not run_live and recorded is not None and not exact
                 and self._stops_on_divergence(rule, effective_type)):
             raise self._stop_at(name, STOP_DIVERGED, recorded.data.input, input, effective_type)
+        # A tool run with an input the recording doesn't have has no recorded output to be compared with.
+        if run_tool and recorded is not None and not exact:
+            raise self._stop_at(name, STOP_DIVERGED, recorded.data.input, input, effective_type)
 
         if recorded is not None:
             recorded.consumed = True
@@ -209,12 +258,20 @@ class VevalExecutionContext:
                 name, LIVE, recorded.index if recorded else None, recorded.data.input if recorded else None, input,
                 conflicting_type,
             ))
-            return False, None, effective_type
+            return False, None, effective_type, None
+        if run_tool:
+            assert recorded is not None
+            self._fidelity._record(ReplayBinding(
+                name, LIVE, recorded.index, recorded.data.input, input, conflicting_type,
+            ))
+            return False, None, effective_type, (recorded, rule)
         if recorded is None:
-            return False, None, effective_type
+            return False, None, effective_type, None
 
         self._fidelity._record(ReplayBinding(
-            name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input, conflicting_type,
+            name,
+            DIVERGED if not exact else NOT_REPLAYED if self._live_tool_steps and effective_type == "tool" else MATCHED,
+            recorded.index, recorded.data.input, input, conflicting_type,
         ))
         # A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
         if recorded.data.status == "error":
@@ -236,7 +293,7 @@ class VevalExecutionContext:
         s.metadata["_source"] = "replay"
         s.complete(mock)
         self._steps.append(s)
-        return True, mock, effective_type
+        return True, mock, effective_type, None
 
     def set_metadata(self, key: str, value: Any) -> None:
         self._metadata[key] = value
@@ -258,11 +315,13 @@ class VevalExecutionContext:
         self._is_replay = True
         self._strict_mock_mode = strict
         self._live_model_steps = live_model_steps
+        self._live_tool_steps = not live_model_steps and options is not None and options.live_tool_steps
         self._step_rules = dict(options.step_rules) if options is not None else {}
         self._stop_on_divergence_types = set(options.stop_on_divergence_types) if options is not None else {"tool"}
         self._recorded = [_RecordedStep(step, i) for i, step in enumerate(trace.steps)]
         self._fidelity = ReplayFidelity(
-            (UnusedRecording(r.data.name, r.index) for r in self._recorded), options.faults if options is not None else ())
+            (UnusedRecording(r.data.name, r.index) for r in self._recorded), options.faults if options is not None else (),
+            self._live_tool_steps)
 
     def _fault_for(self, name: str, input: Any, call: int, rule: Optional[ReplayStepRule]) -> Optional[int]:
         """The index of the first declared fault that applies to this call of the step, or None."""
@@ -400,6 +459,24 @@ class VevalExecutionContext:
                 " If the model took a different path, record that path. If your code added this call, re-record, or "
                 "replay mocked to test this change."
             )
+        if self._live_tool_steps and fault is None:
+            if self._fidelity.tool_output_changes:
+                advice = (
+                    " An earlier tool's output changed and this input follows from it, so there is no recording to "
+                    "compare with. The changed output is reported as the failure."
+                )
+            elif kind == STOP_DIVERGED and recorded_input is None:
+                advice = (
+                    " The recording has no input for this tool (e.g. a trace imported without its arguments), so the "
+                    "tool can't be run against it. Record a trace with the tool's input, or mark the tool "
+                    "reads_external_state."
+                )
+            else:
+                advice = (
+                    " The model is served from the recording, so your code changed this call: its new output can't be "
+                    "compared with a recording. Re-record, or replay mocked to test the code change. If this input "
+                    "doesn't affect the step's output, ignore those fields (step_rules)."
+                )
         if fault is not None:
             advice = (
                 " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a "
@@ -409,7 +486,7 @@ class VevalExecutionContext:
             )
         where = f" after an injected fault ({fault.description})" if fault is not None else ""
         message = (
-            f"{'Live replay' if self._live_model_steps else 'Replay'} stopped at step {position} ('{name}'){where}: "
+            f"{'Live replay' if self._live_model_steps else 'Tool-live replay' if self._live_tool_steps else 'Replay'} stopped at step {position} ('{name}'){where}: "
             f"{detail} The replay is inconclusive: it neither passed nor failed." + advice
         )
 
@@ -465,3 +542,7 @@ class _RecordedStep:
         if ignore not in self._keys_ignoring:
             self._keys_ignoring[ignore] = _ignoring_key(self.data.input, ignore)
         return self._keys_ignoring[ignore]
+
+
+# A tool to run in a tool-live replay: the recording it is compared with, and its step rule.
+_ToolRun = tuple[_RecordedStep, Optional[ReplayStepRule]]

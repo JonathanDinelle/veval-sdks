@@ -110,6 +110,13 @@ class ReplayOptions:
     # recording, so a prompt change shows up while tools never reach a real system. Takes precedence over
     # mock_llm_responses. The replay fails if no step ran live.
     live_model_steps: bool = False
+    # Run steps recorded as tool for real and serve every other step, model steps included, from the recording. The
+    # model's path stays the recorded one, so each tool is called with its recorded input, and its new output is
+    # compared with the recorded output: a difference fails the replay. Catches a changed tool, which mocked and live
+    # replays serve from the recording and never run. Only for tools whose output follows from their input (parsers,
+    # formatters, lookups against fixed data); mark a tool that reads live state with ReplayStepRule.reads_external_state.
+    # Can't be combined with live_model_steps. The replay fails if no tool ran.
+    live_tool_steps: bool = False
     # Per step name: how calls match their recordings (name only, or with some input fields ignored) and, in a
     # live replay, whether a diverged call stops the run or is served. Matching rules apply to mocked replays too.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)

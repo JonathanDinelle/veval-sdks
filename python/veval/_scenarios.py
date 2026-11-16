@@ -16,6 +16,10 @@ class ScenarioOptions:
     # Replay every trace-backed item fully mocked, as if each set ScenarioItem.mock_model_steps; this is the switch
     # for items loaded from the dashboard. VevalTestSdk always replays mocked.
     mock_model_steps: bool = False
+    # Replay every trace-backed item tool-live (ReplayOptions.live_tool_steps), as if each set
+    # ScenarioItem.live_tool_steps: tools run for real against their recorded inputs and the model is served from the
+    # recording. Takes precedence over mock_model_steps. Allowed in VevalTestSdk, since it makes no model calls.
+    live_tool_steps: bool = False
     # ReplayOptions.step_rules for every trace-backed item; an item's own entry for the same step replaces it.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
     # The largest share of replayed items (0 to 1) that may be inconclusive in a passing run. Defaults to 0: any inconclusive item
@@ -49,6 +53,9 @@ class ScenarioItem:
     # VevalTestSdk always replays mocked; for items loaded from the dashboard, pass
     # ScenarioOptions(mock_model_steps=True) to run_scenario_async.
     mock_model_steps: bool = False
+    # For a trace-backed item: replay it tool-live (ReplayOptions.live_tool_steps), running its tools for real and
+    # serving the model from the recording. Takes precedence over mock_model_steps.
+    live_tool_steps: bool = False
     # For a trace-backed item: ReplayOptions.step_rules for its replay. Replaces the scenario-level rule of the same step.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
     # For a trace-backed item: ReplayOptions.faults for its replay, added after the scenario's faults. A synthetic item

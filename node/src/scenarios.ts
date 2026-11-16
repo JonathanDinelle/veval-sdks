@@ -15,6 +15,11 @@ export interface ScenarioItem {
    * `VevalTestSdk` always replays mocked; for items loaded from the dashboard, use `ScenarioOptions.mock_model_steps`.
    */
   mock_model_steps?: boolean;
+  /**
+   * For a trace-backed item: replay it tool-live (`ReplayOptions.live_tool_steps`), running its tools for real and
+   * serving the model from the recording. Takes precedence over `mock_model_steps`.
+   */
+  live_tool_steps?: boolean;
   /** For a trace-backed item: `ReplayOptions.step_rules` for its replay. Replaces the scenario-level rule of the same step. */
   step_rules?: Record<string, ReplayStepRule>;
   /**
@@ -27,6 +32,12 @@ export interface ScenarioItem {
 export interface ScenarioOptions {
   /** Replay every trace-backed item fully mocked, as if each set `mock_model_steps`. `VevalTestSdk` always does. */
   mock_model_steps?: boolean;
+  /**
+   * Replay every trace-backed item tool-live (`ReplayOptions.live_tool_steps`), as if each set `live_tool_steps`:
+   * tools run for real against their recorded inputs and the model is served from the recording. Takes precedence
+   * over `mock_model_steps`. Allowed in `VevalTestSdk`, since it makes no model calls.
+   */
+  live_tool_steps?: boolean;
   /** `ReplayOptions.step_rules` for every trace-backed item; an item's own entry for the same step replaces it. */
   step_rules?: Record<string, ReplayStepRule>;
   /**

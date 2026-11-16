@@ -160,7 +160,9 @@ class VevalTestSdk(VevalSdk):
                         # The test double never makes live model calls: trace-backed items always replay mocked.
                         _scenario_replay_options(
                             item,
-                            ScenarioOptions(mock_model_steps=True, step_rules=options.step_rules, faults=options.faults),
+                            # Tool-live replay makes no model calls either, so the test double allows it.
+                            ScenarioOptions(mock_model_steps=True, live_tool_steps=options.live_tool_steps,
+                                            step_rules=options.step_rules, faults=options.faults),
                             effective_assertions,
                         ),
                     )

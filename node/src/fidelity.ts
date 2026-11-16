@@ -6,10 +6,27 @@ export type ReplayBindingKind =
   | "matched"
   /** No recorded step with that name had an identical input; served the next unused one in recorded order. */
   | "diverged"
-  /** A model step that ran for real in a live replay (`live_model_steps`). */
+  /** A step that ran for real: a model step in a live replay (`live_model_steps`), a tool in a tool-live replay (`live_tool_steps`). */
   | "live"
   /** Served an injected fault (`ReplayOptions.faults`) instead of running or using a recording. */
-  | "faulted";
+  | "faulted"
+  /** Tool-live replay: a tool marked `reads_external_state`, served from the recording instead of running. Not checked. */
+  | "not_replayed";
+
+/**
+ * Tool-live replay: one tool that ran for real, with its recorded and new outputs. `changed` when they differ (key
+ * order and the step rule's `ignore_output_fields` aside). `actual_output` is the error message when the tool threw.
+ */
+export interface ToolOutputCheck {
+  step_name: string;
+  /** The 0-based position of the recording the call was compared with. */
+  recorded_index: number;
+  recorded_output: unknown;
+  actual_output: unknown;
+  changed: boolean;
+  /** The failure for a changed output; null when the output matched. */
+  message: string | null;
+}
 
 /** One replayed call and the recorded step bound to it. `recorded_index` is null for a live model call beyond the ones recorded. */
 export interface ReplayBinding {
@@ -41,6 +58,17 @@ export interface ReplayStepRule {
   match_on_name_only?: boolean;
   /** Input property names dropped at any depth before matching (e.g. "reasoning", "request_id"). */
   ignore_input_fields?: string[];
+  /**
+   * Tool-live replay (`live_tool_steps`): output property names dropped at any depth before a tool's new output is
+   * compared with its recorded output, for values that change on every call (ids, timestamps).
+   */
+  ignore_output_fields?: string[];
+  /**
+   * Tool-live replay: the tool reads state the recording doesn't hold (a live web page, a database, the clock), so
+   * running it again can't be compared with the recording. It is served from the recording and reported as not
+   * replayed, never as passed. Test such tools with real runs and assertions.
+   */
+  reads_external_state?: boolean;
   /**
    * Live replay: what a diverged call does. Unset uses `ReplayOptions.stop_on_divergence_types`: stop when the step
    * was recorded with one of those types, serve otherwise.
@@ -129,7 +157,12 @@ export class ReplayFidelity {
   private readonly _neverExcused = new Set<number>();
 
   /** @internal */
-  constructor(recorded: UnusedRecording[], faults: ReplayFault[] = []) {
+  private readonly _toolChecks: ToolOutputCheck[] = [];
+  /** The replay runs tools for real (`live_tool_steps`). */
+  readonly live_tool_steps: boolean;
+
+  constructor(recorded: UnusedRecording[], faults: ReplayFault[] = [], liveToolSteps = false) {
+    this.live_tool_steps = liveToolSteps;
     this._unused = [...recorded];
     this._faults = [...faults];
     this._fired = faults.map(() => 0);
@@ -231,7 +264,40 @@ export class ReplayFidelity {
    * agent threw, since the exception already explains the rest.
    */
   failure(traceId: string, liveModelSteps: boolean): string | null {
-    return liveModelSteps ? this.noLiveStepFailure(traceId) : this.unusedFailure(traceId);
+    if (liveModelSteps) return this.noLiveStepFailure(traceId);
+    if (this.live_tool_steps) return this.noToolRanFailure(traceId) ?? this.unusedFailure(traceId);
+    return this.unusedFailure(traceId);
+  }
+
+  /** Tool-live replay: each tool that ran for real and how its output compared, in call order. */
+  get tool_checks(): readonly ToolOutputCheck[] {
+    return this._toolChecks;
+  }
+
+  /** Tool-live replay: the tools whose new output differs from the recording. */
+  get tool_output_changes(): ToolOutputCheck[] {
+    return this._toolChecks.filter((c) => c.changed);
+  }
+
+  /** Tool-live replay: tools served from the recording because they read external state. */
+  get not_replayed(): number {
+    return this._bindings.filter((b) => b.kind === "not_replayed").length;
+  }
+
+  /** @internal */
+  checked(check: ToolOutputCheck): void {
+    this._toolChecks.push(check);
+  }
+
+  /** @internal The failure for a tool-live replay in which no tool ran, or null when at least one did. */
+  noToolRanFailure(traceId: string): string | null {
+    if (this._toolChecks.length > 0) return null;
+    return (
+      `Tool-live replay of trace ${traceId} ran no tool: none of the steps it called was recorded as type 'tool' ` +
+      (this.not_replayed > 0 ? `except ${this.not_replayed} that read external state, ` : "") +
+      'so no tool output was checked. Mark tool steps with { type: StepType.Tool } (or setMeta("type", "tool")) ' +
+      "and record a new trace."
+    );
   }
 
   /** @internal One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing. */

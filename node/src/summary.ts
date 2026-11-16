@@ -13,8 +13,13 @@ export function replaySummary(failures: string[], stop: ReplayStop | null | unde
   const used = new Set(fidelity.bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index)).size;
   const recorded = used + fidelity.unused.length;
   const faults = fidelity.faults.length > 0 ? `${count(fidelity.faulted, "fault")} injected, ` : "";
-  return `${head} — ${used}/${recorded} recorded steps used, ${fidelity.diverged} diverged but served, ${fidelity.live} live, ` +
-    faults + (stop ? "left the path" : "stayed on path");
+  // In a tool-live replay every step that ran for real is a tool, so the tool counts replace "live".
+  const ran = fidelity.live_tool_steps
+    ? `${count(fidelity.tool_checks.length, "tool")} replayed, ${fidelity.not_replayed} not replayed, ` +
+      `${count(fidelity.tool_output_changes.length, "output")} changed, `
+    : `${fidelity.live} live, `;
+  return `${head} — ${used}/${recorded} recorded steps used, ${fidelity.diverged} diverged but served, ` + ran +
+    faults + (fidelity.stop ? "left the path" : "stayed on path");
 }
 
 /** @internal The one-line summary on a scenario run result. */

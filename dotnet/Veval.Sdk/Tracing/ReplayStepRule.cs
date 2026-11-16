@@ -22,6 +22,19 @@ public class ReplayStepRule
     public ISet<string> IgnoreInputFields { get; set; } = new HashSet<string>();
 
     /// <summary>
+    /// Tool-live replay (<see cref="ReplayOptions.LiveToolSteps"/>): output property names dropped at any depth before
+    /// a tool's new output is compared with its recorded output, for values that change on every call (ids, timestamps).
+    /// </summary>
+    public ISet<string> IgnoreOutputFields { get; set; } = new HashSet<string>();
+
+    /// <summary>
+    /// Tool-live replay: the tool reads state the recording doesn't hold (a live web page, a database, the clock), so
+    /// running it again can't be compared with the recording. It is served from the recording and reported as not
+    /// replayed, never as passed. Test such tools with real runs and assertions.
+    /// </summary>
+    public bool ReadsExternalState { get; set; }
+
+    /// <summary>
     /// Live replay: what a diverged call does. Null uses <see cref="ReplayOptions.StopOnDivergenceTypes"/>: stop
     /// when the step was recorded with one of those types, serve otherwise.
     /// </summary>

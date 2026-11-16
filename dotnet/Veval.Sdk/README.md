@@ -145,6 +145,8 @@ if (!result.Passed)
 
 In replay, `TrackStepAsync` returns the recorded output instead of running your code. Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `result.Fidelity`. A step with no recorded output throws rather than silently making a live call, and a recorded step the agent never calls fails the replay. To replay your production entry point unchanged, use `new VevalTestSdk(options).WithReplay(trace)` and call your agent as usual.
 
+`LiveToolSteps = true` runs tool steps for real against their recorded inputs, serves the model from the recording, and fails when a tool's output changed (`ReplayStepRule.IgnoreOutputFields` for volatile fields, `ReadsExternalState` for tools that read live state). Only for tools whose output follows from their input.
+
 To test failure paths, add faults to `ReplayOptions.Faults`: replay serves a timeout, an HTTP error, a rate limit, a malformed output or your own exception in place of a step's recorded output, so retries, fallbacks and guards run.
 
 ```csharp

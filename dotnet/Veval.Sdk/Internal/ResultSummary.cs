@@ -16,8 +16,13 @@ internal static class ResultSummary
         var used = fidelity.Bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex).Distinct().Count();
         var recorded = used + fidelity.Unused.Count;
         var faults = fidelity.Faults.Count > 0 ? $"{Count(fidelity.Faulted, "fault")} injected, " : "";
-        return $"{head} — {used}/{recorded} recorded steps used, {fidelity.Diverged} diverged but served, {fidelity.Live} live, " +
-               faults + (stop != null ? "left the path" : "stayed on path");
+        // In a tool-live replay every step that ran for real is a tool, so the tool counts replace "live".
+        var ran = fidelity.LiveToolSteps
+            ? $"{Count(fidelity.ToolChecks.Count, "tool")} replayed, {fidelity.NotReplayed} not replayed, " +
+              $"{Count(fidelity.ToolOutputChanges.Count, "output")} changed, "
+            : $"{fidelity.Live} live, ";
+        return $"{head} — {used}/{recorded} recorded steps used, {fidelity.Diverged} diverged but served, " + ran +
+               faults + (fidelity.Stop != null ? "left the path" : "stayed on path");
     }
 
     public static string ForScenario(ScenarioRunResult result)

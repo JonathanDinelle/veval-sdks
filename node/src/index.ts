@@ -13,6 +13,7 @@ export {
   ReplayStopReason,
   ReplayStoppedError,
   RecordedStepError,
+  ToolOutputCheck,
 } from "./fidelity";
 export { ReplayFault, FaultKind, MalformedOutput, FaultReport, FaultTimeoutError, FaultHttpError } from "./faults";
 export {

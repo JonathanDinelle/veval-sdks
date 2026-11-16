@@ -180,6 +180,8 @@ public class VevalTestSdk : IVevalSdk
                             new ScenarioOptions
                             {
                                 MockModelSteps = true,
+                                // Tool-live replay makes no model calls either, so the test double allows it.
+                                LiveToolSteps = options?.LiveToolSteps ?? false,
                                 StepRules = options?.StepRules ?? new(),
                                 Faults = options?.Faults ?? new(),
                             },

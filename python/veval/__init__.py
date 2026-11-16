@@ -15,6 +15,7 @@ from ._fidelity import (
     ReplayStop,
     ReplayStoppedError,
     RecordedStepError,
+    ToolOutputCheck,
 )
 from ._faults import ReplayFault, FaultHttpError, FaultReport
 from ._snapshots import (
@@ -59,6 +60,7 @@ __all__ = [
     "ReplayStop",
     "ReplayStoppedError",
     "RecordedStepError",
+    "ToolOutputCheck",
     "ReplayFault",
     "FaultHttpError",
     "FaultReport",

@@ -20,9 +20,15 @@ def replay_summary(failures: list[str], stop: Optional[ReplayStop], fidelity: Op
     used = len({b.recorded_index for b in fidelity.bindings if b.recorded_index is not None})
     recorded = used + len(fidelity.unused)
     faults = f"{_count(fidelity.faulted, 'fault')} injected, " if fidelity.faults else ""
+    # In a tool-live replay every step that ran for real is a tool, so the tool counts replace "live".
+    ran = (
+        f"{_count(len(fidelity.tool_checks), 'tool')} replayed, {fidelity.not_replayed} not replayed, "
+        f"{_count(len(fidelity.tool_output_changes), 'output')} changed, "
+        if fidelity.live_tool_steps else f"{fidelity.live} live, "
+    )
     return (
-        f"{head} — {used}/{recorded} recorded steps used, {fidelity.diverged} diverged but served, {fidelity.live} live, "
-        + faults + ("left the path" if stop is not None else "stayed on path")
+        f"{head} — {used}/{recorded} recorded steps used, {fidelity.diverged} diverged but served, " + ran
+        + faults + ("left the path" if fidelity.stop is not None else "stayed on path")
     )
 
 

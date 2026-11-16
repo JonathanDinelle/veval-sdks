@@ -24,6 +24,7 @@ public class VevalExecutionContext
     private ReplayFidelity? _fidelity;
     private bool _strictMockMode;
     private bool _liveModelSteps;
+    private bool _liveToolSteps;
     private IReadOnlyDictionary<string, ReplayStepRule> _stepRules = new Dictionary<string, ReplayStepRule>();
     private ISet<string> _stopOnDivergenceTypes = new HashSet<string> { "tool" };
     private readonly Dictionary<string, int> _callCounts = new();
@@ -83,6 +84,8 @@ public class VevalExecutionContext
             // In live mode a model step runs for real, including extra calls of a step recorded as a model step and
             // model steps the recording never contained.
             var runLive = _liveModelSteps && effectiveType == StepType.Llm;
+            // In tool-live mode a tool runs for real against its recorded input; one that reads external state can't.
+            var runTool = _liveToolSteps && effectiveType == StepType.Tool && rule?.ReadsExternalState != true;
             var conflictingType = knownType != null && declaredType != null && declaredType != knownType
                 ? declaredType : null;
 
@@ -94,7 +97,7 @@ public class VevalExecutionContext
 
             if (recorded == null && !runLive && _strictMockMode)
             {
-                if (_liveModelSteps) throw StopAt(name, diverged: false, null, input, effectiveType);
+                if (_liveModelSteps || _liveToolSteps) throw StopAt(name, diverged: false, null, input, effectiveType);
                 throw new InvalidOperationException(
                     $"Replay mode: no mock output for step '{name}'. " +
                     $"Available steps: {AvailableSteps()}. " +
@@ -105,6 +108,10 @@ public class VevalExecutionContext
             if (_liveModelSteps && !runLive && recorded != null && !exact && StopsOnDivergence(rule, effectiveType))
                 throw StopAt(name, diverged: true, recorded.Data.Input, input, effectiveType);
 
+            // A tool run with an input the recording doesn't have has no recorded output to be compared with.
+            if (runTool && recorded != null && !exact)
+                throw StopAt(name, diverged: true, recorded.Data.Input, input, effectiveType);
+
             if (recorded != null) recorded.Consumed = true;
 
             if (runLive)
@@ -112,9 +119,17 @@ public class VevalExecutionContext
                 _fidelity!.Record(new ReplayBinding(name, ReplayBindingKind.Live, recorded?.Index, recorded?.Data.Input, input)
                     { DeclaredType = conflictingType });
             }
+            else if (runTool)
+            {
+                _fidelity!.Record(new ReplayBinding(name, ReplayBindingKind.Live, recorded!.Index, recorded.Data.Input, input)
+                    { DeclaredType = conflictingType });
+                return await RunToolAgainstRecording(name, input, step, effectiveType, recorded, rule);
+            }
             else if (recorded != null)
             {
-                var kind = exact ? ReplayBindingKind.Matched : ReplayBindingKind.Diverged;
+                var kind = !exact ? ReplayBindingKind.Diverged
+                    : _liveToolSteps && effectiveType == StepType.Tool ? ReplayBindingKind.NotReplayed
+                    : ReplayBindingKind.Matched;
                 _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input)
                     { DeclaredType = conflictingType });
 
@@ -158,6 +173,53 @@ public class VevalExecutionContext
     }
 
     private static readonly StepOptions NoOptions = new();
+
+    /// <summary>
+    /// Tool-live replay: runs the tool for real and compares its output, or its failure, with the recording. The agent
+    /// gets the new output, so the code that reads it runs too; a difference is recorded and fails the replay.
+    /// </summary>
+    private async Task<T> RunToolAgainstRecording<T>(string name, object? input, Func<StepHandle, Task<T>> step,
+        string? type, RecordedStep recorded, ReplayStepRule? rule)
+    {
+        var s = new Step(name, null) { Input = input, Type = type ?? StepType.Tool };
+        s.Metadata["_source"] = "live_tool";
+        _steps.Add(s);
+        var recordedFailed = recorded.Data.Status == "error";
+        var recordedOutput = recordedFailed ? recorded.Data.Error : recorded.Data.Output;
+        T result;
+        try
+        {
+            result = await step(new StepHandle(s));
+        }
+        catch (Exception ex)
+        {
+            s.Fail(ex.Message);
+            CheckTool(name, recorded, recordedOutput, ex.Message, changed: !recordedFailed,
+                recordedFailed ? null : $"threw ({ex.Message}) where the recording returned {OneLine(recordedOutput)}");
+            throw;
+        }
+        s.Complete(result);
+
+        var ignore = rule?.IgnoreOutputFields is { Count: > 0 } fields
+            ? fields.OrderBy(f => f, StringComparer.Ordinal).ToArray()
+            : Array.Empty<string>();
+        var changed = recordedFailed || IgnoringKey(result, ignore) != IgnoringKey(recordedOutput, ignore);
+        CheckTool(name, recorded, recordedOutput, result, changed,
+            recordedFailed
+                ? $"returned {OneLine(result)} where the recording failed ({recordedOutput})"
+                : $"returned {OneLine(result)} instead of {OneLine(recordedOutput)}");
+        return result;
+    }
+
+    private void CheckTool(string name, RecordedStep recorded, object? recordedOutput, object? actualOutput, bool changed, string? how)
+    {
+        _fidelity!.Checked(new ToolOutputCheck(name, recorded.Index, recordedOutput, actualOutput, changed)
+        {
+            Message = changed
+                ? $"Tool output changed: '{name}' (recorded step {recorded.Index + 1}) ran with its recorded input and {how}."
+                : null,
+        });
+    }
 
     /// <summary>A recorded (or injected) output as the step's return type, converting through JSON when needed.</summary>
     private static T ConvertOutput<T>(object? value)
@@ -311,6 +373,7 @@ public class VevalExecutionContext
         IsReplay = true;
         _strictMockMode = strict;
         _liveModelSteps = liveModelSteps;
+        _liveToolSteps = !liveModelSteps && options?.LiveToolSteps == true;
         if (options != null)
         {
             _stepRules = options.StepRules;
@@ -323,7 +386,7 @@ public class VevalExecutionContext
                 "Ensure the trace was recorded with steps before using it for replay.");
 
         _recorded = trace.Steps.Select((step, i) => new RecordedStep(step, i)).ToList();
-        _fidelity = new ReplayFidelity(_recorded.Select(r => new UnusedRecording(r.Data.Name, r.Index)), options?.Faults);
+        _fidelity = new ReplayFidelity(_recorded.Select(r => new UnusedRecording(r.Data.Name, r.Index)), options?.Faults, _liveToolSteps);
     }
 
     /// <summary>
@@ -408,6 +471,16 @@ public class VevalExecutionContext
             ? " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
               "call whose input now carries the error), so no recorded output can stand in for it. " +
               (_liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.")
+            : _liveToolSteps && _fidelity.ToolOutputChanges.Count > 0
+            ? " An earlier tool's output changed and this input follows from it, so there is no recording to compare " +
+              "with. The changed output is reported as the failure."
+            : _liveToolSteps && diverged && recordedInput == null
+            ? " The recording has no input for this tool (e.g. a trace imported without its arguments), so the tool " +
+              "can't be run against it. Record a trace with the tool's input, or mark the tool ReadsExternalState."
+            : _liveToolSteps
+            ? " The model is served from the recording, so your code changed this call: its new output can't be compared " +
+              "with a recording. Re-record, or replay mocked to test the code change. If this input doesn't affect the " +
+              "step's output, ignore those fields (StepRules)."
             : diverged
             ? " If the model took a different path, record that path. If your code changed how the step is called, " +
               "re-record, or replay mocked to test this change. If this input doesn't affect the step's output, " +
@@ -415,7 +488,7 @@ public class VevalExecutionContext
             : " If the model took a different path, record that path. If your code added this call, re-record, or " +
               "replay mocked to test this change.";
         var where = fault != null ? $" after an injected fault ({fault.Description})" : "";
-        var message = $"{(_liveModelSteps ? "Live replay" : "Replay")} stopped at step {position} ('{name}'){where}: {detail} " +
+        var message = $"{(_liveModelSteps ? "Live replay" : _liveToolSteps ? "Tool-live replay" : "Replay")} stopped at step {position} ('{name}'){where}: {detail} " +
                       "The replay is inconclusive: it neither passed nor failed." + advice;
 
         var stop = new ReplayStop(position, name, reason, recordedInput, input, message);
