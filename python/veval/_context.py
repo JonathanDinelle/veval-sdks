@@ -5,13 +5,13 @@ from typing import Any, Callable, Awaitable, Optional, TypeVar, TYPE_CHECKING
 from ._step import Step, StepHandle, StepOptions
 from ._faults import EMPTY, MALFORMED, RETURNS, ReplayFault
 from ._fidelity import (
-    DIVERGED, FAULTED, LIVE, MATCHED, STOP, STOP_AFTER_FAULT, STOP_DIVERGED, STOP_NO_RECORDING,
+    DIVERGED, FAULTED, LIVE, MATCHED, STOP, STOP_AFTER_FAULT, STOP_DIVERGED, STOP_NO_RECORDING, RecordedStepError,
     ReplayBinding, ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStoppedError, UnusedRecording,
 )
 from ._snapshots import _canonicalize
 
 if TYPE_CHECKING:
-    from ._tracing import StepData, TraceData
+    from ._tracing import ReplayOptions, StepData, TraceData
 
 _NO_IGNORED_FIELDS: set[str] = set()
 
@@ -178,9 +178,10 @@ class VevalExecutionContext:
             declared_type if known_type and declared_type and declared_type != known_type else None
         )
 
-        # After a fault, a mocked replay serves only calls that still match their recording: a fallback the
-        # recording never called, or a model call whose prompt now carries the error, has no truthful output.
-        if not self._live_model_steps and self._fidelity._first_fired is not None and (recorded is None or not exact):
+        # After a fault, replay serves only calls that still match their recording: a fallback the recording never
+        # called, or a call whose input now carries the error, has no truthful output. In a live replay, model steps
+        # still run live, so the model's reaction to the error is tested.
+        if not run_live and self._fidelity._first_fired is not None and (recorded is None or not exact):
             raise self._stop_at(
                 name, STOP_NO_RECORDING if recorded is None else STOP_DIVERGED,
                 recorded.data.input if recorded is not None else None, input, effective_type)
@@ -215,6 +216,17 @@ class VevalExecutionContext:
         self._fidelity._record(ReplayBinding(
             name, MATCHED if exact else DIVERGED, recorded.index, recorded.data.input, input, conflicting_type,
         ))
+        # A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
+        if recorded.data.status == "error":
+            failed = Step(name)
+            failed.input = input
+            failed.type = effective_type or "custom"
+            failed.metadata["_source"] = "replay"
+            error = RecordedStepError(name, recorded.data.error)
+            failed.fail(str(error))
+            self._steps.append(failed)
+            raise error
+
         mock = recorded.data.output
         s = Step(name)
         s.input = input
@@ -234,12 +246,10 @@ class VevalExecutionContext:
         trace: TraceData,
         strict: bool = True,
         live_model_steps: bool = False,
-        step_rules: Optional[dict[str, ReplayStepRule]] = None,
-        stop_on_divergence_types: Optional[set[str]] = None,
-        faults: Optional[list[ReplayFault]] = None,
+        options: Optional[ReplayOptions] = None,
     ) -> None:
         """live_model_steps: run steps recorded as llm for real and serve every other step from the recording.
-        step_rules and stop_on_divergence_types: step matching rules, and which diverged steps stop a live replay."""
+        options: step matching rules, which diverged steps stop a live replay, and the faults to inject."""
         if not trace.steps:
             raise RuntimeError(
                 f"Replay trace '{trace.trace_id}' has no steps. Cannot mock LLM calls. "
@@ -248,10 +258,11 @@ class VevalExecutionContext:
         self._is_replay = True
         self._strict_mock_mode = strict
         self._live_model_steps = live_model_steps
-        self._step_rules = dict(step_rules or {})
-        self._stop_on_divergence_types = set(stop_on_divergence_types if stop_on_divergence_types is not None else {"tool"})
+        self._step_rules = dict(options.step_rules) if options is not None else {}
+        self._stop_on_divergence_types = set(options.stop_on_divergence_types) if options is not None else {"tool"}
         self._recorded = [_RecordedStep(step, i) for i, step in enumerate(trace.steps)]
-        self._fidelity = ReplayFidelity((UnusedRecording(r.data.name, r.index) for r in self._recorded), faults or ())
+        self._fidelity = ReplayFidelity(
+            (UnusedRecording(r.data.name, r.index) for r in self._recorded), options.faults if options is not None else ())
 
     def _fault_for(self, name: str, input: Any, call: int, rule: Optional[ReplayStepRule]) -> Optional[int]:
         """The index of the first declared fault that applies to this call of the step, or None."""
@@ -268,6 +279,26 @@ class VevalExecutionContext:
             return i
         return None
 
+    def _recordings_of(self, fault: ReplayFault, rule: Optional[ReplayStepRule]) -> tuple[list[int], list[int]]:
+        """The fault's step recordings, split into the ones it targets (its input when scoped to one, its calls from
+        from_call) and the ones it doesn't. The first list holds only unused targeted recordings; the second every
+        recording of the step the fault would never have hit."""
+        ignore = tuple(sorted(rule.ignore_input_fields)) if rule is not None else ()
+        fault_key = _ignoring_key(fault.input, ignore) if fault.has_input else None
+        targeted: list[int] = []
+        untargeted: list[int] = []
+        call = 0
+        for r in self._recorded or []:
+            if r.data.name != fault.step_name:
+                continue
+            call += 1
+            hit = call >= fault.from_call and (fault_key is None or _ignoring_key(r.data.input, ignore) == fault_key)
+            if not hit:
+                untargeted.append(r.index)
+            elif not r.consumed:
+                targeted.append(r.index)
+        return targeted, untargeted
+
     def _serve_fault(
         self, name: str, input: Any, fault_index: int, rule: Optional[ReplayStepRule], declared_type: Optional[str],
     ) -> Any:
@@ -275,7 +306,8 @@ class VevalExecutionContext:
         exception or returns its malformed output. The call uses up no recording, so a retry is served the recorded one."""
         assert self._fidelity is not None
         fault = self._fidelity._faults[fault_index]
-        self._fidelity._fire(fault_index)
+        targeted, untargeted = self._recordings_of(fault, rule)
+        self._fidelity._fire(fault_index, min(targeted) if targeted else None, untargeted)
         self._fidelity._record(ReplayBinding(name, FAULTED, None, None, input))
 
         recorded_type = self._recorded_type_of(name)

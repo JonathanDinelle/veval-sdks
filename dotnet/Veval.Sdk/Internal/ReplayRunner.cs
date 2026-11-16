@@ -47,7 +47,8 @@ internal static class ReplayRunner
             if (error != null) failures.Add($"Replay threw exception: {error}");
             if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
                 failures.Add(bindingFailure);
-            if (ctx.ReplayFidelity is { } fidelity)
+            // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
+            if (error == null && ctx.ReplayFidelity is { } fidelity)
                 failures.AddRange(fidelity.UnfiredFaultFailures(name => ctx.Steps.Count(s => s.Name == name)));
             foreach (var assertion in options.Assertions)
             {

@@ -75,8 +75,8 @@ export interface ReplayOptions {
    * Failures to serve instead of recorded outputs: a timeout, an HTTP error, a rate limit, a malformed output or a
    * custom error (`ReplayFault`), so the replay runs the agent's retries, fallbacks and guards. Needs a mocked or live
    * replay. Once a fault has fired, a call that matches no unused recording stops the replay inconclusive instead of
-   * being served a recording from another path; in a live replay, model steps still run live, so the model's reaction
-   * to the error is tested. A fault that never fires fails the replay.
+   * being served a recording from another path, in mocked and live replays alike; in a live replay, model steps still
+   * run live, so the model's reaction to the error is tested. A fault that never fires fails the replay.
    */
   faults?: ReplayFault[];
 }

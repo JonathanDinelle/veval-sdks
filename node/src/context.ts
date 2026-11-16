@@ -1,6 +1,6 @@
 import { Step, StepHandle, StepOptions } from "./step";
 import { StepData, TraceData } from "./tracing";
-import { ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStopReason, ReplayStoppedError } from "./fidelity";
+import { RecordedStepError, ReplayFidelity, ReplayStepRule, ReplayStop, ReplayStopReason, ReplayStoppedError } from "./fidelity";
 import { canonicalize } from "./snapshots";
 import { ReplayFault } from "./faults";
 
@@ -166,9 +166,10 @@ export class VevalExecutionContext {
       const runLive = this._liveModelSteps && effectiveType === "llm";
       const conflictingType = knownType && declaredType && declaredType !== knownType ? declaredType : null;
 
-      // After a fault, a mocked replay serves only calls that still match their recording: a fallback the
-      // recording never called, or a model call whose prompt now carries the error, has no truthful output.
-      if (!this._liveModelSteps && this._fidelity!.firstFired !== null && (recorded === null || !exact))
+      // After a fault, replay serves only calls that still match their recording: a fallback the recording never
+      // called, or a call whose input now carries the error, has no truthful output. In a live replay, model steps
+      // still run live, so the model's reaction to the error is tested.
+      if (!runLive && this._fidelity!.firstFired !== null && (recorded === null || !exact))
         throw this.stopAt(name, recorded === null ? "no_recording" : "diverged", recorded?.data.input ?? null, input, effectiveType);
 
       if (recorded === null && !runLive && this._strictMockMode) {
@@ -196,6 +197,18 @@ export class VevalExecutionContext {
           step_name: name, kind: exact ? "matched" : "diverged", recorded_index: recorded.index,
           recorded_input: recorded.data.input, actual_input: input, declared_type: conflictingType,
         });
+        // A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
+        if (recorded.data.status === "error") {
+          const failed = new Step(name);
+          failed.input = input;
+          failed.type = effectiveType ?? "custom";
+          failed.metadata["_source"] = "replay";
+          const error = new RecordedStepError(name, recorded.data.error);
+          failed.fail(error.message);
+          this._steps.push(failed);
+          throw error;
+        }
+
         const mock = recorded.data.output;
         const s = new Step(name);
         s.input = input;
@@ -273,6 +286,26 @@ export class VevalExecutionContext {
   }
 
   /**
+   * The fault's step recordings, split into the ones it targets (its input when scoped to one, its calls from
+   * `from_call`) and the ones it doesn't. `targeted` holds only unused ones; `untargeted` every recording of the step
+   * the fault would never have hit.
+   */
+  private recordingsOf(fault: ReplayFault, rule: ReplayStepRule | undefined): { targeted: number[]; untargeted: number[] } {
+    const ignore = new Set(rule?.ignore_input_fields ?? []);
+    const faultKey = fault.has_input ? ignoringKey(fault.input, ignore) : null;
+    const targeted: number[] = [];
+    const untargeted: number[] = [];
+    let call = 0;
+    for (const r of this._recorded!.filter((r) => r.data.name === fault.step_name)) {
+      call++;
+      const hit = call >= fault.from_call && (faultKey === null || ignoringKey(r.data.input, ignore) === faultKey);
+      if (!hit) untargeted.push(r.index);
+      else if (!r.consumed) targeted.push(r.index);
+    }
+    return { targeted, untargeted };
+  }
+
+  /**
    * Serves a fault at this call: records it as a step with `_source = "fault"` and either throws the fault's error or
    * returns its malformed output. The call uses up no recording, so a retry is served the recorded one.
    */
@@ -281,7 +314,8 @@ export class VevalExecutionContext {
   ): T {
     const fidelity = this._fidelity!;
     const fault = fidelity.declaredFaults[faultIndex];
-    fidelity.fired(faultIndex);
+    const { targeted, untargeted } = this.recordingsOf(fault, rule);
+    fidelity.fired(faultIndex, targeted.length > 0 ? Math.min(...targeted) : null, untargeted);
     fidelity.record({ step_name: name, kind: "faulted", recorded_index: null, recorded_input: null, actual_input: input });
 
     const recordedType = this.recordedTypeOf(name);

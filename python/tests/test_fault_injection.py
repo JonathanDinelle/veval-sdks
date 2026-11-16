@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from veval._scenario_report import _run_payload  # noqa: E402
 from veval import (  # noqa: E402
-    FaultHttpError, ReplayFault, ReplayOptions, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
+    FaultHttpError, RecordedStepError, ReplayFault, ReplayOptions, ScenarioItem, ScenarioOptions, StepData, StepOptions, StepType,
     TraceAssert, TraceData, VevalOptions, VevalSdk, VevalTestSdk,
 )
 
@@ -325,6 +325,82 @@ def test_description_names_kind_step_and_scope():
     assert ReplayFault.returns("parse", 42).description == "Returned value on 'parse'"
     with pytest.raises(ValueError):
         ReplayFault.http_error("book", 200)
+
+
+def test_recorded_failure_replays_as_a_failure_so_the_retry_gets_the_next_recording():
+    # Production: the first search failed with a 429, the retry succeeded.
+    t = trace()
+    failed = recorded("search_flights", "Paris", None, "tool")
+    failed.status = "error"
+    failed.error = "429 rate limited"
+    t.steps.insert(0, failed)
+    first = []
+
+    def run(ctx):
+        try:
+            flights = ctx.track_step("search_flights", "Paris", lambda: "live")
+        except Exception as ex:
+            first.append(ex)
+            flights = ctx.track_step("search_flights", "Paris", lambda: "live")
+        return ctx.track_step("summarize", f"flights: {flights}", lambda: "live")
+    result = sdk().replay(t, run, ReplayOptions(
+        mock_llm_responses=True, assertions=[TraceAssert.max_attempts("search_flights", 1)]))
+
+    assert result.outcome == "passed", result.failures
+    assert isinstance(first[0], RecordedStepError)
+    assert str(first[0]) == "Step 'search_flights' failed in the recorded run: 429 rate limited"
+    assert [s.status for s in result.replayed_context.steps] == ["error", "success", "success"]
+    assert result.fidelity.unused == []
+
+
+def test_live_replay_after_fault_a_diverged_non_model_step_stops_instead_of_being_served():
+    t = trace()
+    t.steps.insert(1, recorded("rank_results", FLIGHTS, "AF123", "custom"))
+
+    async def run(ctx):
+        try:
+            flights = await ctx.track_step_async("search_flights", "Paris", lambda: _value("live"))
+        except Exception as ex:
+            flights = f"error: {ex}"
+        best = await ctx.track_step_async("rank_results", flights, lambda: _value("live"))
+        return await ctx.track_step_async("summarize", f"flights: {best}", lambda: _value("live"))
+
+    result = asyncio.run(sdk().replay_async(t, run, ReplayOptions(
+        live_model_steps=True, faults=[ReplayFault.timeout("search_flights")])))
+
+    assert result.outcome == "inconclusive"
+    assert result.inconclusive.step_name == "rank_results"
+    assert result.inconclusive.reason == "after_fault"
+    assert result.inconclusive.message.startswith(
+        "Live replay stopped at step 2 ('rank_results') after an injected fault")
+
+
+def test_every_call_fault_scoped_to_an_input_does_not_excuse_recordings_it_never_targeted():
+    # Recorded: search(Rome), search(Paris), summarize. The fault fails every call for Rome only.
+    t = trace()
+    t.steps.insert(0, recorded("search_flights", "Rome", '["AZ1"]', "tool"))
+
+    # A regression: after Rome fails, the agent gives up instead of searching Paris.
+    def run(ctx):
+        try:
+            return ctx.track_step("search_flights", "Rome", lambda: "live")
+        except FaultHttpError:
+            return "No flights"
+    result = sdk().replay(t, run, mocked(ReplayFault.http_error("search_flights", 503).when_input("Rome")))
+
+    assert result.outcome == "failed"
+    assert len(result.failures) == 1
+    # Skipping summarize is the fallback; skipping Paris, which the fault never targets, is the regression.
+    assert "never called 1 recorded step(s)" in result.failures[0]
+    assert "'search_flights' (recorded step 2)" in result.failures[0]
+
+
+def test_an_agent_that_raises_before_the_faulted_step_reports_only_the_exception():
+    def run(ctx):
+        raise RuntimeError("config missing")
+    result = sdk().replay(trace(), run, mocked(ReplayFault.timeout("search_flights")))
+
+    assert result.failures == ["Replay threw exception: config missing"]
 
 
 # --- Faults in scenarios -------------------------------------------------------------------------------------------

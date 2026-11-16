@@ -86,9 +86,10 @@ public class VevalExecutionContext
             var conflictingType = knownType != null && declaredType != null && declaredType != knownType
                 ? declaredType : null;
 
-            // After a fault, a mocked replay serves only calls that still match their recording: a fallback the
-            // recording never called, or a model call whose prompt now carries the error, has no truthful output.
-            if (!_liveModelSteps && _fidelity!.FirstFired != null && (recorded == null || !exact))
+            // After a fault, replay serves only calls that still match their recording: a fallback the recording never
+            // called, or a call whose input now carries the error, has no truthful output. In a live replay, model steps
+            // still run live, so the model's reaction to the error is tested.
+            if (!runLive && _fidelity!.FirstFired != null && (recorded == null || !exact))
                 throw StopAt(name, diverged: recorded != null, recorded?.Data.Input, input, effectiveType);
 
             if (recorded == null && !runLive && _strictMockMode)
@@ -116,6 +117,17 @@ public class VevalExecutionContext
                 var kind = exact ? ReplayBindingKind.Matched : ReplayBindingKind.Diverged;
                 _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input)
                     { DeclaredType = conflictingType });
+
+                // A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
+                if (recorded.Data.Status == "error")
+                {
+                    var failed = new Step(name, null) { Input = input, Type = effectiveType ?? StepType.Custom };
+                    failed.Metadata["_source"] = "replay";
+                    var error = new RecordedStepException(name, recorded.Data.Error);
+                    failed.Fail(error.Message);
+                    _steps.Add(failed);
+                    throw error;
+                }
 
                 var result = ConvertOutput<T>(recorded.Data.Output);
 
@@ -178,13 +190,38 @@ public class VevalExecutionContext
     }
 
     /// <summary>
+    /// The fault's step recordings, split into the ones it targets (its input when scoped to one, its calls from
+    /// <see cref="ReplayFault.FromCall"/>) and the ones it doesn't. Only unused targeted recordings are returned in
+    /// <c>Targeted</c>; <c>Untargeted</c> lists every recording of the step the fault would never have hit.
+    /// </summary>
+    private (List<int> Targeted, List<int> Untargeted) RecordingsOf(ReplayFault fault, ReplayStepRule? rule)
+    {
+        string[] ignore = rule?.IgnoreInputFields is { Count: > 0 } fields
+            ? fields.OrderBy(f => f, StringComparer.Ordinal).ToArray()
+            : Array.Empty<string>();
+        var faultKey = fault.HasInput ? IgnoringKey(fault.Input, ignore) : null;
+        var targeted = new List<int>();
+        var untargeted = new List<int>();
+        var call = 0;
+        foreach (var r in _recorded!.Where(r => r.Data.Name == fault.StepName))
+        {
+            call++;
+            var hit = call >= fault.FromCall && (faultKey == null || r.KeyIgnoring(ignore) == faultKey);
+            if (!hit) untargeted.Add(r.Index);
+            else if (!r.Consumed) targeted.Add(r.Index);
+        }
+        return (targeted, untargeted);
+    }
+
+    /// <summary>
     /// Serves a fault at this call: records it as a step with <c>_source = "fault"</c> and either throws the fault's
     /// exception or returns its malformed output. The call uses up no recording, so a retry is served the recorded one.
     /// </summary>
     private T ServeFault<T>(string name, object? input, int faultIndex, ReplayStepRule? rule, string? declaredType)
     {
         var fault = _fidelity!.DeclaredFaults[faultIndex];
-        _fidelity.Fired(faultIndex);
+        var (targeted, untargeted) = RecordingsOf(fault, rule);
+        _fidelity.Fired(faultIndex, targeted.Count > 0 ? targeted.Min() : null, untargeted);
         _fidelity.Record(new ReplayBinding(name, ReplayBindingKind.Faulted, null, null, input));
 
         var recordedType = RecordedTypeOf(name);

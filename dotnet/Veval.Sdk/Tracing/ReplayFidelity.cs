@@ -71,17 +71,26 @@ public class ReplayFidelity
     internal IReadOnlyList<ReplayFault> DeclaredFaults => _faults;
     internal int FiredCount(int faultIndex) => _fired[faultIndex];
 
-    internal void Fired(int faultIndex)
+    /// <param name="firstMatchingRecording">
+    /// The first unused recording the fault would have hit, or null: for a fault that fails every call, recordings
+    /// from there on are excused.
+    /// </param>
+    /// <param name="untargeted">
+    /// Recordings of the faulted step the fault would never have hit (other inputs, earlier calls). They are never
+    /// excused: the fault gives the agent no reason to skip them.
+    /// </param>
+    internal void Fired(int faultIndex, int? firstMatchingRecording, IEnumerable<int> untargeted)
     {
         _fired[faultIndex]++;
         FirstFired ??= _faults[faultIndex];
         var fault = _faults[faultIndex];
         if (fault.Count != null || _fired[faultIndex] > 1) return;
+        _neverExcused.UnionWith(untargeted);
 
         // A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted
         // step and everything after it may rightly go unused. Recordings before it were the agent's to call.
-        var fromIndex = _unused.Where(u => u.StepName == fault.StepName).Select(u => (int?)u.RecordedIndex).Min()
-                        ?? (_bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex!.Value + 1).DefaultIfEmpty(0).Max());
+        var fromIndex = firstMatchingRecording
+                        ?? _bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex!.Value + 1).DefaultIfEmpty(0).Max();
         _unusedExcusedFrom = _unusedExcusedFrom is { } current ? Math.Min(current, fromIndex) : fromIndex;
     }
 
@@ -89,6 +98,7 @@ public class ReplayFidelity
     /// Recordings from this index on may go unused: a fault that fails every call fired there. Null while none has.
     /// </summary>
     private int? _unusedExcusedFrom;
+    private readonly HashSet<int> _neverExcused = new();
 
     internal void Record(ReplayBinding binding)
     {
@@ -118,11 +128,13 @@ public class ReplayFidelity
     /// <summary>The failure for recorded steps that were never called, or null when every recording was used.</summary>
     /// <remarks>
     /// After a fault that fails every call, recordings from the faulted step on are excused: the agent took its
-    /// fallback path. A fault limited with <see cref="ReplayFault.Times"/> is expected to rejoin the recording.
+    /// fallback path. Recordings of that step the fault doesn't target (another input, an earlier call) are not. A
+    /// fault limited with <see cref="ReplayFault.Times"/> is expected to rejoin the recording.
     /// </remarks>
     internal string? UnusedFailure(string traceId)
     {
-        var unused = _unused.Where(u => _unusedExcusedFrom is not { } from || u.RecordedIndex < from).ToList();
+        var unused = _unused.Where(u =>
+            _unusedExcusedFrom is not { } from || u.RecordedIndex < from || _neverExcused.Contains(u.RecordedIndex)).ToList();
         if (unused.Count == 0) return null;
         var steps = string.Join(", ", unused.Select(u => $"'{u.StepName}' (recorded step {u.RecordedIndex + 1})"));
         return $"Replay never called {unused.Count} recorded step(s) from trace {traceId}: {steps}. " +

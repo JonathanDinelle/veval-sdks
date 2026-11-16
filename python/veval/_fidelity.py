@@ -90,6 +90,19 @@ class ReplayStoppedError(Exception):
         self.stop = stop
 
 
+class RecordedStepError(Exception):
+    """Raised from a step when replay serves a recording of that step that failed in the recorded run, so the agent's
+    retry or fallback runs as it did then. It carries the recorded error message, not the original exception's class:
+    code that only catches a specific exception type won't catch it."""
+
+    def __init__(self, step_name: str, recorded_error: Optional[str]):
+        super().__init__(
+            f"Step '{step_name}' failed in the recorded run: {recorded_error or 'no error message recorded'}")
+        self.step_name = step_name
+        # The error the recorded step failed with, or None when the recording didn't keep one.
+        self.recorded_error = recorded_error
+
+
 @dataclass(frozen=True)
 class UnusedRecording:
     """A recorded step the replay never called."""
@@ -111,6 +124,7 @@ class ReplayFidelity:
         self._first_fired: Optional[ReplayFault] = None
         # Recordings from this index on may go unused: a fault that fails every call fired there. None while none has.
         self._unused_excused_from: Optional[int] = None
+        self._never_excused: set[int] = set()
 
     @property
     def faulted(self) -> int:
@@ -122,18 +136,22 @@ class ReplayFidelity:
         """Each fault in ReplayOptions.faults and how many times it fired, in declared order."""
         return [FaultReport(f, n) for f, n in zip(self._faults, self._fired)]
 
-    def _fire(self, fault_index: int) -> None:
+    def _fire(self, fault_index: int, first_matching_recording: Optional[int], untargeted: Iterable[int]) -> None:
+        """first_matching_recording: the first unused recording the fault would have hit, or None; for a fault that
+        fails every call, recordings from there on are excused. untargeted: recordings of the faulted step the fault
+        would never have hit (other inputs, earlier calls); they are never excused, since the fault gives the agent no
+        reason to skip them."""
         self._fired[fault_index] += 1
         fault = self._faults[fault_index]
         if self._first_fired is None:
             self._first_fired = fault
         if fault.count is not None or self._fired[fault_index] > 1:
             return
+        self._never_excused.update(untargeted)
         # A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted
         # step and everything after it may rightly go unused. Recordings before it were the agent's to call.
-        of_step = [u.recorded_index for u in self._unused if u.step_name == fault.step_name]
         used = [b.recorded_index + 1 for b in self._bindings if b.recorded_index is not None]
-        start = min(of_step) if of_step else max(used, default=0)
+        start = first_matching_recording if first_matching_recording is not None else max(used, default=0)
         self._unused_excused_from = start if self._unused_excused_from is None else min(self._unused_excused_from, start)
 
     @property
@@ -202,10 +220,12 @@ class ReplayFidelity:
 
     def _unused_failure(self, trace_id: str) -> Optional[str]:
         """The failure for recorded steps that were never called, or None when every recording was used. After a fault
-        that fails every call, recordings from the faulted step on are excused: the agent took its fallback path. A
-        fault limited with times(n) is expected to rejoin the recording."""
+        that fails every call, recordings from the faulted step on are excused: the agent took its fallback path.
+        Recordings of that step the fault doesn't target (another input, an earlier call) are not. A fault limited with
+        times(n) is expected to rejoin the recording."""
         start = self._unused_excused_from
-        unused = [u for u in self._unused if start is None or u.recorded_index < start]
+        unused = [u for u in self._unused
+                  if start is None or u.recorded_index < start or u.recorded_index in self._never_excused]
         if not unused:
             return None
         steps = ", ".join(f"'{u.step_name}' (recorded step {u.recorded_index + 1})" for u in unused)

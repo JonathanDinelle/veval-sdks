@@ -196,7 +196,9 @@ export class VevalSdk {
       if (error) failures.push(`Replay threw exception: ${error}`);
       const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
       if (bindingFailure) failures.push(bindingFailure);
-      failures.push(...(ctx.replayFidelity?.unfiredFaultFailures((name) => ctx.steps.filter((s) => s.name === name).length) ?? []));
+      // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
+      if (!error)
+        failures.push(...(ctx.replayFidelity?.unfiredFaultFailures((name) => ctx.steps.filter((s) => s.name === name).length) ?? []));
       for (const assertion of options?.assertions ?? []) {
         const failure = await assertion.evaluate(ctx);
         if (failure) failures.push(failure);

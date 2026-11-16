@@ -89,6 +89,24 @@ export class ReplayStoppedError extends Error {
   }
 }
 
+/**
+ * Thrown from a step when replay serves a recording of that step that failed in the recorded run, so the agent's retry
+ * or fallback runs as it did then. It carries the recorded error message, not the original error's class: code that
+ * only catches a specific error type won't catch it.
+ */
+export class RecordedStepError extends Error {
+  readonly step_name: string;
+  /** The error the recorded step failed with, or null when the recording didn't keep one. */
+  readonly recorded_error: string | null;
+
+  constructor(stepName: string, recordedError: string | null) {
+    super(`Step '${stepName}' failed in the recorded run: ${recordedError ?? "no error message recorded"}`);
+    this.name = "RecordedStepError";
+    this.step_name = stepName;
+    this.recorded_error = recordedError;
+  }
+}
+
 /** A recorded step the replay never called. */
 export interface UnusedRecording {
   step_name: string;
@@ -108,6 +126,7 @@ export class ReplayFidelity {
   private _firstFired: ReplayFault | null = null;
   /** Recordings from this index on may go unused: a fault that fails every call fired there. Null while none has. */
   private _unusedExcusedFrom: number | null = null;
+  private readonly _neverExcused = new Set<number>();
 
   /** @internal */
   constructor(recorded: UnusedRecording[], faults: ReplayFault[] = []) {
@@ -164,18 +183,23 @@ export class ReplayFidelity {
     return this._fired[faultIndex];
   }
 
-  /** @internal */
-  fired(faultIndex: number): void {
+  /**
+   * @internal `firstMatchingRecording`: the first unused recording the fault would have hit, or null; for a fault
+   * that fails every call, recordings from there on are excused. `untargeted`: recordings of the faulted step the
+   * fault would never have hit (other inputs, earlier calls); they are never excused, since the fault gives the agent
+   * no reason to skip them.
+   */
+  fired(faultIndex: number, firstMatchingRecording: number | null, untargeted: number[]): void {
     this._fired[faultIndex]++;
     const fault = this._faults[faultIndex];
     this._firstFired ??= fault;
     if (fault.count !== null || this._fired[faultIndex] > 1) return;
+    for (const index of untargeted) this._neverExcused.add(index);
 
     // A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted step
     // and everything after it may rightly go unused. Recordings before it were the agent's to call.
-    const ofStep = this._unused.filter((u) => u.step_name === fault.step_name).map((u) => u.recorded_index);
     const used = this._bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index! + 1);
-    const from = ofStep.length > 0 ? Math.min(...ofStep) : Math.max(0, ...used);
+    const from = firstMatchingRecording ?? Math.max(0, ...used);
     this._unusedExcusedFrom = this._unusedExcusedFrom === null ? from : Math.min(this._unusedExcusedFrom, from);
   }
 
@@ -226,11 +250,13 @@ export class ReplayFidelity {
   /**
    * @internal The failure for recorded steps that were never called, or null when every recording was used. After a
    * fault that fails every call, recordings from the faulted step on are excused: the agent took its fallback path.
-   * A fault limited with `times(n)` is expected to rejoin the recording.
+   * Recordings of that step the fault doesn't target (another input, an earlier call) are not. A fault limited with
+   * `times(n)` is expected to rejoin the recording.
    */
   unusedFailure(traceId: string): string | null {
     const from = this._unusedExcusedFrom;
-    const unused = this._unused.filter((u) => from === null || u.recorded_index < from);
+    const unused = this._unused.filter(
+      (u) => from === null || u.recorded_index < from || this._neverExcused.has(u.recorded_index));
     if (unused.length === 0) return null;
     const steps = unused.map((u) => `'${u.step_name}' (recorded step ${u.recorded_index + 1})`).join(", ");
     return (

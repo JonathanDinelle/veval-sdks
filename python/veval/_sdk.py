@@ -424,15 +424,10 @@ def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionC
             "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.")
     ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
     ctx._is_replay = True
-    rules = {
-        "step_rules": options.step_rules,
-        "stop_on_divergence_types": options.stop_on_divergence_types,
-        "faults": options.faults,
-    }
     if options.live_model_steps:
-        ctx.load_mock_outputs(trace, live_model_steps=True, **rules)
+        ctx.load_mock_outputs(trace, live_model_steps=True, options=options)
     elif options.mock_llm_responses:
-        ctx.load_mock_outputs(trace, **rules)
+        ctx.load_mock_outputs(trace, options=options)
     return ctx
 
 
@@ -466,7 +461,8 @@ def _replay_result(
         binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
         if binding_failure:
             failures.append(binding_failure)
-        if fidelity is not None:
+        # Like the binding failure: when the agent raised, the exception already explains why a fault never fired.
+        if fidelity is not None and not error:
             failures.extend(fidelity._unfired_fault_failures(lambda name: sum(1 for s in ctx.steps if s.name == name)))
         failures.extend(assertion_failures)
 

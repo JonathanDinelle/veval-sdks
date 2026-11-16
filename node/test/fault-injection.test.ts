@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { FaultHttpError, FaultTimeoutError, ReplayFault, ReplayOptions, TraceAssert, TraceData, VevalExecutionContext } from "../src";
+import { FaultHttpError, FaultTimeoutError, RecordedStepError, ReplayFault, ReplayOptions, TraceAssert, TraceData, VevalExecutionContext } from "../src";
 import { ScenarioReport } from "../src/scenario-report";
 import { recorded, sdk, testSdk } from "./helpers";
 
@@ -282,6 +282,71 @@ test("description names kind, step and scope", () => {
   assert.equal(ReplayFault.rateLimit("llm").description, "Rate limit (429, Retry-After 1s) on 'llm'");
   assert.equal(ReplayFault.returns("parse", 42).description, "Returned value on 'parse'");
   assert.throws(() => ReplayFault.httpError("book", 200), RangeError);
+});
+
+test("a recorded failure replays as a failure, so the retry gets the next recording", async () => {
+  // Production: the first search failed with a 429, the retry succeeded.
+  const t = trace();
+  t.steps.unshift({ ...recorded("search_flights", "Paris", null, "tool"), status: "error", error: "429 rate limited" });
+
+  let first: unknown;
+  const result = await sdk().replayAsync(t, async (ctx) => {
+    let flights: string;
+    try { flights = await ctx.trackStepAsync("search_flights", "Paris", async () => "live"); }
+    catch (err) {
+      first = err;
+      flights = await ctx.trackStepAsync("search_flights", "Paris", async () => "live");
+    }
+    return ctx.trackStepAsync("summarize", `flights: ${flights}`, async () => "live");
+  }, { mock_llm_responses: true, assertions: [TraceAssert.maxAttempts("search_flights", 1)] });
+
+  assert.equal(result.outcome, "passed", result.failures.join("; "));
+  assert.ok(first instanceof RecordedStepError);
+  assert.equal((first as Error).message, "Step 'search_flights' failed in the recorded run: 429 rate limited");
+  assert.deepEqual(result.replayed_context!.steps.map((s) => s.status), ["error", "success", "success"]);
+  assert.equal(result.fidelity!.unused.length, 0);
+});
+
+test("live replay: after a fault, a diverged non-model step stops instead of being served", async () => {
+  const t = trace();
+  t.steps.splice(1, 0, recorded("rank_results", FLIGHTS, "AF123", "custom"));
+  const result = await sdk().replayAsync(t, async (ctx) => {
+    let flights: string;
+    try { flights = await ctx.trackStepAsync("search_flights", "Paris", async () => "live"); }
+    catch (err) { flights = `error: ${(err as Error).message}`; }
+    const best = await ctx.trackStepAsync("rank_results", flights, async () => "live");
+    return ctx.trackStepAsync("summarize", `flights: ${best}`, async () => "live");
+  }, { live_model_steps: true, assertions: [], faults: [ReplayFault.timeout("search_flights")] });
+
+  assert.equal(result.outcome, "inconclusive");
+  assert.equal(result.inconclusive!.step_name, "rank_results");
+  assert.equal(result.inconclusive!.reason, "after_fault");
+  assert.ok(result.inconclusive!.message.startsWith("Live replay stopped at step 2 ('rank_results') after an injected fault"));
+});
+
+test("an every-call fault scoped to an input doesn't excuse recordings it never targeted", async () => {
+  // Recorded: search(Rome), search(Paris), summarize. The fault fails every call for Rome only.
+  const t = trace();
+  t.steps.unshift(recorded("search_flights", "Rome", '["AZ1"]', "tool"));
+
+  // A regression: after Rome fails, the agent gives up instead of searching Paris.
+  const result = await sdk().replayAsync(t, async (ctx) => {
+    try { return await ctx.trackStepAsync("search_flights", "Rome", async () => "live"); }
+    catch { return "No flights"; }
+  }, mocked(ReplayFault.httpError("search_flights", 503).whenInput("Rome")));
+
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.failures.length, 1);
+  // Skipping summarize is the fallback; skipping Paris, which the fault never targets, is the regression.
+  assert.match(result.failures[0], /never called 1 recorded step\(s\)/);
+  assert.match(result.failures[0], /'search_flights' \(recorded step 2\)/);
+});
+
+test("an agent that throws before the faulted step reports only the exception", async () => {
+  const result = await sdk().replayAsync(trace(), async () => { throw new Error("config missing"); },
+    mocked(ReplayFault.timeout("search_flights")));
+
+  assert.deepEqual(result.failures, ["Replay threw exception: config missing"]);
 });
 
 // --- Faults in scenarios -----------------------------------------------------------------------------------------

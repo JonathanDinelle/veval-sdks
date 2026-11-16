@@ -388,6 +388,85 @@ public class FaultInjectionTests
         FluentActions.Invoking(() => ReplayFault.HttpError("book", 200)).Should().Throw<ArgumentOutOfRangeException>();
     }
 
+    [Fact]
+    public async Task RecordedFailure_ReplaysAsAFailure_SoTheRetryGetsTheNextRecording()
+    {
+        // Production: the first search failed with a 429, the retry succeeded.
+        var trace = Trace();
+        trace.Steps.Insert(0, Recorded("search_flights", "tool", "Paris", null));
+        trace.Steps[0].Status = "error";
+        trace.Steps[0].Error = "429 rate limited";
+
+        Exception? first = null;
+        var result = await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            string flights;
+            try { flights = await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live")); }
+            catch (Exception ex)
+            {
+                first = ex;
+                flights = await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live"));
+            }
+            return await ctx.TrackStepAsync("summarize", $"flights: {flights}", () => Task.FromResult("live"));
+        }, new ReplayOptions { MockLlmResponses = true, Assertions = [TraceAssert.MaxAttempts("search_flights", 1)] });
+
+        result.Outcome.Should().Be(ReplayOutcome.Passed, string.Join("; ", result.Failures));
+        first.Should().BeOfType<RecordedStepException>()
+            .Which.Message.Should().Be("Step 'search_flights' failed in the recorded run: 429 rate limited");
+        result.ReplayedContext!.Steps.Select(s => s.Status).Should().Equal("error", "success", "success");
+        result.Fidelity!.Unused.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task LiveReplay_AfterFault_ADivergedNonModelStep_StopsInsteadOfBeingServed()
+    {
+        var trace = Trace();
+        trace.Steps.Insert(1, Recorded("rank_results", "custom", "[\"AF123\",\"BA456\"]", "AF123"));
+        var result = await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            string flights;
+            try { flights = await ctx.TrackStepAsync("search_flights", "Paris", () => Task.FromResult("live")); }
+            catch (Exception ex) { flights = $"error: {ex.Message}"; }
+            var best = await ctx.TrackStepAsync("rank_results", flights, () => Task.FromResult("live"));
+            return await ctx.TrackStepAsync("summarize", $"flights: {best}", () => Task.FromResult("live"));
+        }, new ReplayOptions { LiveModelSteps = true, Faults = { ReplayFault.Timeout("search_flights") } });
+
+        result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
+        result.Inconclusive!.StepName.Should().Be("rank_results");
+        result.Inconclusive.Reason.Should().Be(ReplayStopReason.AfterFault);
+        result.Inconclusive.Message.Should().StartWith("Live replay stopped at step 2 ('rank_results') after an injected fault");
+    }
+
+    [Fact]
+    public async Task EveryCallFault_WithInput_DoesNotExcuseRecordingsItNeverTargeted()
+    {
+        // Recorded: search(Rome), search(Paris), summarize. The fault fails every call for Rome only.
+        var trace = Trace();
+        trace.Steps.Insert(0, Recorded("search_flights", "tool", "Rome", "[\"AZ1\"]"));
+
+        // A regression: after Rome fails, the agent gives up instead of searching Paris.
+        var result = await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            try { return await ctx.TrackStepAsync("search_flights", "Rome", () => Task.FromResult("live")); }
+            catch (FaultHttpException) { return "No flights"; }
+        }, Mocked(ReplayFault.HttpError("search_flights", 503).WhenInput("Rome")));
+
+        result.Outcome.Should().Be(ReplayOutcome.Failed);
+        result.Failures.Should().ContainSingle().Which.Should()
+            .Contain("never called 1 recorded step(s)").And.Contain("'search_flights' (recorded step 2)",
+                "the fault never targets Paris, so skipping it is a regression; skipping summarize is the fallback");
+    }
+
+    [Fact]
+    public async Task AgentThrowsBeforeTheFaultedStep_ReportsOnlyTheException()
+    {
+        var result = await Sdk().ReplayAsync(Trace(), new Func<VevalExecutionContext, Task<string>>(
+            _ => throw new InvalidOperationException("config missing")),
+            Mocked(ReplayFault.Timeout("search_flights")));
+
+        result.Failures.Should().ContainSingle().Which.Should().Be("Replay threw exception: config missing");
+    }
+
     // --- Faults in scenarios ---------------------------------------------------------------------------------------
 
     private static VevalTestSdk TestSdk() => new VevalTestSdk(new VevalOptions { ApiKey = "test" }).WithReplay(Trace());

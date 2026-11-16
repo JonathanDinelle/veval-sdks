@@ -181,10 +181,10 @@ public class VevalSdk : IVevalSdk
         };
     }
 
-    /// <summary>The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step.</summary>
     internal const string SyntheticItemFaultsMessage =
         "ScenarioItem.Faults needs a trace-backed item (TraceId): faults replace recorded outputs, and a synthetic item has none.";
 
+    /// <summary>The scenario's step rules with the item's on top: an item rule replaces the scenario rule of the same step.</summary>
     internal static Dictionary<string, ReplayStepRule> MergeStepRules(
         IReadOnlyDictionary<string, ReplayStepRule>? scenarioRules, IReadOnlyDictionary<string, ReplayStepRule> itemRules)
     {
