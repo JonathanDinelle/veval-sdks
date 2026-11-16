@@ -193,18 +193,24 @@ export class VevalSdk {
     const failures: string[] = [];
     let recordingDiff: SnapshotDiff | null = null;
     const stop = ctx.replayFidelity?.stop ?? null;
+    const toolChanges = ctx.replayFidelity?.tool_output_changes ?? [];
 
-    // A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
-    // after the stop (caught it, threw something else) is a consequence of the stop, not a finding.
+    // A stopped replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did after the
+    // stop (caught it, threw something else) is a consequence of the stop, not a finding. A tool output that changed
+    // before the stop is a finding: the replay fails on it, and the stop is the change's consequence.
     if (stop) {
       status = "inconclusive";
       error = stop.message;
+      if (toolChanges.length > 0) {
+        failures.push(...toolChanges.map((c) => c.message!));
+        failures.push(`The replay then stopped at step ${stop.step} ('${stop.step_name}'), whose input follows from the changed output.`);
+      }
     } else {
       if (error) failures.push(`Replay threw exception: ${error}`);
       const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
       if (bindingFailure) failures.push(bindingFailure);
       // A changed tool output is reported even when the agent then threw: the change is likely why it did.
-      failures.push(...(ctx.replayFidelity?.tool_output_changes.map((c) => c.message!) ?? []));
+      failures.push(...toolChanges.map((c) => c.message!));
       // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
       if (!error)
         failures.push(...(ctx.replayFidelity?.unfiredFaultFailures((name) => ctx.steps.filter((s) => s.name === name).length) ?? []));
@@ -220,11 +226,13 @@ export class VevalSdk {
       }
     }
 
-    const outcome = stop ? "inconclusive" : failures.length === 0 ? "passed" : "failed";
+    // Failed, not inconclusive, when a tool output changed before the stop.
+    const inconclusive = toolChanges.length > 0 ? null : stop;
+    const outcome = inconclusive ? "inconclusive" : failures.length === 0 ? "passed" : "failed";
     return {
       passed: outcome === "passed",
       outcome,
-      inconclusive: stop,
+      inconclusive,
       failures,
       replayed_context: ctx,
       recording_diff: recordingDiff,
@@ -235,7 +243,7 @@ export class VevalSdk {
       completed_at: completedAt.toISOString(),
       status,
       error,
-      summary: replaySummary(failures, stop, ctx.replayFidelity),
+      summary: replaySummary(failures, inconclusive, ctx.replayFidelity),
     };
   }
 

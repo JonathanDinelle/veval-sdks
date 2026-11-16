@@ -40,9 +40,20 @@ internal static class ReplayRunner
         var failures = new List<string>();
         SnapshotDiff? recordingDiff = null;
 
-        // A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
-        // after the stop (caught it, threw something else) is a consequence of the stop, not a finding.
-        if (ctx.ReplayFidelity?.Stop is { } stop)
+        var toolChanges = ctx.ReplayFidelity?.ToolOutputChanges ?? Array.Empty<ToolOutputCheck>();
+        var stop = ctx.ReplayFidelity?.Stop;
+
+        // A stopped replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did after the
+        // stop (caught it, threw something else) is a consequence of the stop, not a finding. A tool output that changed
+        // before the stop is a finding: the replay fails on it, and the stop is the change's consequence.
+        if (stop != null && toolChanges.Count > 0)
+        {
+            status = "inconclusive";
+            error = stop.Message;
+            failures.AddRange(toolChanges.Select(c => c.Message!));
+            failures.Add($"The replay then stopped at step {stop.Step} ('{stop.StepName}'), whose input follows from the changed output.");
+        }
+        else if (stop != null)
         {
             status = "inconclusive";
             error = stop.Message;
@@ -53,8 +64,7 @@ internal static class ReplayRunner
             if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
                 failures.Add(bindingFailure);
             // A changed tool output is reported even when the agent then threw: the change is likely why it did.
-            if (ctx.ReplayFidelity is { } checks)
-                failures.AddRange(checks.ToolOutputChanges.Select(c => c.Message!));
+            failures.AddRange(toolChanges.Select(c => c.Message!));
             // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
             if (error == null && ctx.ReplayFidelity is { } fidelity)
                 failures.AddRange(fidelity.UnfiredFaultFailures(name => ctx.Steps.Count(s => s.Name == name)));
@@ -69,7 +79,8 @@ internal static class ReplayRunner
         return new ReplayResult
         {
             Failures = failures,
-            Inconclusive = ctx.ReplayFidelity?.Stop,
+            // Failed, not inconclusive, when a tool output changed before the stop.
+            Inconclusive = toolChanges.Count > 0 ? null : stop,
             ReplayedContext = ctx,
             Output = output,
             StartedAt = startedAt,

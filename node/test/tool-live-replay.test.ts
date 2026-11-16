@@ -39,7 +39,8 @@ test("an unchanged tool runs for real, the model comes from the recording, and t
   assert.equal(result.fidelity!.tool_checks.length, 1);
   assert.equal(result.fidelity!.tool_checks[0].changed, false);
   assert.equal(result.replayed_context!.steps[1].metadata["_source"], "live_tool");
-  assert.match(result.summary, /1 tools replayed, 0 not replayed, 0 outputs changed/);
+  assert.equal(result.summary,
+    "passed — 3/3 recorded steps used, 0 diverged but served, 1 tool replayed, 0 not replayed, 0 outputs changed, stayed on path");
 });
 
 test("a changed tool fails with both outputs, and the agent gets the new output", async () => {
@@ -51,6 +52,46 @@ test("a changed tool fails with both outputs, and the agent gets the new output"
   assert.equal(result.fidelity!.tool_output_changes[0].actual_output, "EUR 1250");
   assert.equal(result.replayed_context!.steps[2].input, "price: EUR 1250");
   assert.match(result.summary, /1 output changed/);
+});
+
+test("a changed tool feeding another tool fails on the change, not inconclusive", async () => {
+  // Recorded pipeline: format_price, then the agent's code passes its output to render_label (no model in between).
+  const t = trace();
+  t.steps.splice(2, 0, recorded("render_label", "EUR 12.50", "[EUR 12.50]", "tool"));
+  const result = await sdk().replayAsync(t, async (ctx) => {
+    const product = await ctx.trackStepAsync("pick_product", ctx.input, async () => "x");
+    const price = await ctx.trackStepAsync("format_price", product, async () => "EUR 1250", { type: StepType.Tool });
+    return ctx.trackStepAsync("render_label", price, async () => `[${price}]`, { type: StepType.Tool });
+  }, toolLive);
+
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.inconclusive, null);
+  assert.deepEqual(result.failures, [
+    `Tool output changed: 'format_price' (recorded step 2) ran with its recorded input and returned "EUR 1250" instead of "EUR 12.50".`,
+    "The replay then stopped at step 3 ('render_label'), whose input follows from the changed output.",
+  ]);
+  assert.match(result.fidelity!.stop!.message, /An earlier tool's output changed/);
+  assert.ok(result.summary.startsWith("failed (2 failures)"));
+  assert.ok(result.summary.endsWith("left the path"));
+});
+
+test("an external-state tool with a changed input is reported as diverged, not hidden as not replayed", async () => {
+  const result = await sdk().replayAsync(trace(), async (ctx) => {
+    await ctx.trackStepAsync("pick_product", ctx.input, async () => "x");
+    return ctx.trackStepAsync("format_price", "LAMP", async () => "live", { type: StepType.Tool });
+  }, { ...toolLive, step_rules: { format_price: { reads_external_state: true } } });
+
+  assert.equal(result.fidelity!.bindings.find((b) => b.step_name === "format_price")!.kind, "diverged");
+  assert.equal(result.fidelity!.not_replayed, 0);
+});
+
+test("a tool without a recorded input says so when it stops", async () => {
+  const t = trace();
+  t.steps[1].input = null;
+  const result = await sdk().replayAsync(t, agent(() => "EUR 12.50"), toolLive);
+
+  assert.equal(result.outcome, "inconclusive");
+  assert.match(result.inconclusive!.message, /The recording has no input for this tool/);
 });
 
 test("object outputs compare ignoring key order and ignored fields", async () => {

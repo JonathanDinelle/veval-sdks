@@ -206,7 +206,7 @@ export class VevalExecutionContext {
         });
         return this.runToolAgainstRecording(name, input, fn, effectiveType, recorded!, rule);
       } else if (recorded !== null) {
-        const kind = this._liveToolSteps && effectiveType === "tool" ? "not_replayed" : exact ? "matched" : "diverged";
+        const kind = !exact ? "diverged" : this._liveToolSteps && effectiveType === "tool" ? "not_replayed" : "matched";
         this._fidelity!.record({
           step_name: name, kind, recorded_index: recorded.index,
           recorded_input: recorded.data.input, actual_input: input, declared_type: conflictingType,
@@ -467,9 +467,15 @@ export class VevalExecutionContext {
         : " If the model took a different path, record that path. If your code added this call, re-record, or " +
           "replay mocked to test this change.";
     if (this._liveToolSteps && !fault)
-      advice = " The model is served from the recording, so your code changed this call: its new output can't be " +
-        "compared with a recording. Re-record, or replay mocked to test the code change. If this input doesn't affect " +
-        "the step's output, ignore those fields (step_rules).";
+      advice = this._fidelity!.tool_output_changes.length > 0
+        ? " An earlier tool's output changed and this input follows from it, so there is no recording to compare " +
+          "with. The changed output is reported as the failure."
+        : kind === "diverged" && (recordedInput === null || recordedInput === undefined)
+        ? " The recording has no input for this tool (e.g. a trace imported without its arguments), so the tool " +
+          "can't be run against it. Record a trace with the tool's input, or mark the tool reads_external_state."
+        : " The model is served from the recording, so your code changed this call: its new output can't be " +
+          "compared with a recording. Re-record, or replay mocked to test the code change. If this input doesn't " +
+          "affect the step's output, ignore those fields (step_rules).";
     if (fault)
       advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
         "call whose input now carries the error), so no recorded output can stand in for it. " +

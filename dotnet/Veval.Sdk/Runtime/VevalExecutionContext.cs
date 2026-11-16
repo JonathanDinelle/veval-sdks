@@ -127,8 +127,9 @@ public class VevalExecutionContext
             }
             else if (recorded != null)
             {
-                var kind = _liveToolSteps && effectiveType == StepType.Tool ? ReplayBindingKind.NotReplayed
-                    : exact ? ReplayBindingKind.Matched : ReplayBindingKind.Diverged;
+                var kind = !exact ? ReplayBindingKind.Diverged
+                    : _liveToolSteps && effectiveType == StepType.Tool ? ReplayBindingKind.NotReplayed
+                    : ReplayBindingKind.Matched;
                 _fidelity!.Record(new ReplayBinding(name, kind, recorded.Index, recorded.Data.Input, input)
                     { DeclaredType = conflictingType });
 
@@ -470,6 +471,12 @@ public class VevalExecutionContext
             ? " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
               "call whose input now carries the error), so no recorded output can stand in for it. " +
               (_liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.")
+            : _liveToolSteps && _fidelity.ToolOutputChanges.Count > 0
+            ? " An earlier tool's output changed and this input follows from it, so there is no recording to compare " +
+              "with. The changed output is reported as the failure."
+            : _liveToolSteps && diverged && recordedInput == null
+            ? " The recording has no input for this tool (e.g. a trace imported without its arguments), so the tool " +
+              "can't be run against it. Record a trace with the tool's input, or mark the tool ReadsExternalState."
             : _liveToolSteps
             ? " The model is served from the recording, so your code changed this call: its new output can't be compared " +
               "with a recording. Re-record, or replay mocked to test the code change. If this input doesn't affect the " +

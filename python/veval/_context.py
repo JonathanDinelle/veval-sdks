@@ -270,7 +270,7 @@ class VevalExecutionContext:
 
         self._fidelity._record(ReplayBinding(
             name,
-            NOT_REPLAYED if self._live_tool_steps and effective_type == "tool" else MATCHED if exact else DIVERGED,
+            DIVERGED if not exact else NOT_REPLAYED if self._live_tool_steps and effective_type == "tool" else MATCHED,
             recorded.index, recorded.data.input, input, conflicting_type,
         ))
         # A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
@@ -460,11 +460,23 @@ class VevalExecutionContext:
                 "replay mocked to test this change."
             )
         if self._live_tool_steps and fault is None:
-            advice = (
-                " The model is served from the recording, so your code changed this call: its new output can't be "
-                "compared with a recording. Re-record, or replay mocked to test the code change. If this input doesn't "
-                "affect the step's output, ignore those fields (step_rules)."
-            )
+            if self._fidelity.tool_output_changes:
+                advice = (
+                    " An earlier tool's output changed and this input follows from it, so there is no recording to "
+                    "compare with. The changed output is reported as the failure."
+                )
+            elif kind == STOP_DIVERGED and recorded_input is None:
+                advice = (
+                    " The recording has no input for this tool (e.g. a trace imported without its arguments), so the "
+                    "tool can't be run against it. Record a trace with the tool's input, or mark the tool "
+                    "reads_external_state."
+                )
+            else:
+                advice = (
+                    " The model is served from the recording, so your code changed this call: its new output can't be "
+                    "compared with a recording. Re-record, or replay mocked to test the code change. If this input "
+                    "doesn't affect the step's output, ignore those fields (step_rules)."
+                )
         if fault is not None:
             advice = (
                 " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a "

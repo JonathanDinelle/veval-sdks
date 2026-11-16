@@ -62,7 +62,8 @@ public class ToolLiveReplayTests
         result.Output.Should().Be("The lamp costs EUR 12.50.");
         result.Fidelity!.ToolChecks.Should().ContainSingle().Which.Changed.Should().BeFalse();
         result.ReplayedContext!.Steps[1].Metadata["_source"].Should().Be("live_tool");
-        result.Summary.Should().Contain("1 tools replayed, 0 not replayed, 0 outputs changed");
+        result.Summary.Should().Be(
+            "passed — 3/3 recorded steps used, 0 diverged but served, 1 tool replayed, 0 not replayed, 0 outputs changed, stayed on path");
     }
 
     [Fact]
@@ -76,6 +77,67 @@ public class ToolLiveReplayTests
         result.Fidelity!.ToolOutputChanges.Should().ContainSingle().Which.ActualOutput.Should().Be("EUR 1250");
         result.ReplayedContext!.Steps[2].Input.Should().Be("price: EUR 1250", "the agent's code ran on the new output");
         result.Summary.Should().Contain("1 output changed");
+    }
+
+    [Fact]
+    public async Task ChangedTool_FeedingAnotherTool_FailsOnTheChange_NotInconclusive()
+    {
+        // Recorded pipeline: format_price, then the agent's code passes its output to render_label (no model in between).
+        var trace = Trace();
+        trace.Steps.Insert(2, Recorded("render_label", "tool", "EUR 12.50", "[EUR 12.50]"));
+
+        var result = await Sdk().ReplayAsync(trace, async ctx =>
+        {
+            var product = await ctx.TrackStepAsync("pick_product", (string)ctx.Input!, () => Task.FromResult("x"));
+            var price = await ctx.TrackStepAsync("format_price", product, () => Task.FromResult("EUR 1250"),
+                new StepOptions { Type = StepType.Tool });
+            return await ctx.TrackStepAsync("render_label", price, () => Task.FromResult($"[{price}]"),
+                new StepOptions { Type = StepType.Tool });
+        }, new ReplayOptions { LiveToolSteps = true });
+
+        result.Outcome.Should().Be(ReplayOutcome.Failed, "the changed output is a finding the later stop must not hide");
+        result.Inconclusive.Should().BeNull();
+        result.Failures.Should().Equal(
+            "Tool output changed: 'format_price' (recorded step 2) ran with its recorded input and returned \"EUR 1250\" instead of \"EUR 12.50\".",
+            "The replay then stopped at step 3 ('render_label'), whose input follows from the changed output.");
+        result.Fidelity!.Stop!.Message.Should().Contain("An earlier tool's output changed");
+        result.Summary.Should().StartWith("failed (2 failures)").And.EndWith("left the path");
+
+        var run = new ScenarioRunResult { Results = { new ItemRunResult { Item = new ScenarioItem(), Failures = result.Failures, Inconclusive = result.Inconclusive } } };
+        run.FailCount.Should().Be(1);
+        run.InconclusiveCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ExternalStateTool_WithAChangedInput_IsReportedAsDiverged_NotHiddenAsNotReplayed()
+    {
+        var options = new ReplayOptions
+        {
+            LiveToolSteps = true,
+            StepRules = { ["format_price"] = new ReplayStepRule { ReadsExternalState = true } },
+        };
+
+        var result = await Sdk().ReplayAsync(Trace(), async ctx =>
+        {
+            await ctx.TrackStepAsync("pick_product", (string)ctx.Input!, () => Task.FromResult("x"));
+            return await ctx.TrackStepAsync("format_price", "LAMP", () => Task.FromResult("live"),
+                new StepOptions { Type = StepType.Tool });
+        }, options);
+
+        result.Fidelity!.Bindings.Single(b => b.StepName == "format_price").Kind.Should().Be(ReplayBindingKind.Diverged);
+        result.Fidelity.NotReplayed.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ToolWithoutARecordedInput_SaysSoWhenItStops()
+    {
+        var trace = Trace();
+        trace.Steps[1].Input = null;
+
+        var result = await Sdk().ReplayAsync(trace, Agent(_ => "EUR 12.50"), ToolLive);
+
+        result.Outcome.Should().Be(ReplayOutcome.Inconclusive);
+        result.Inconclusive!.Message.Should().Contain("The recording has no input for this tool");
     }
 
     [Fact]

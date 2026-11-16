@@ -455,11 +455,18 @@ def _replay_result(
     recording_diff = None
     fidelity = ctx.replay_fidelity
     stop = fidelity.stop if fidelity is not None else None
+    tool_changes = fidelity.tool_output_changes if fidelity is not None else []
 
-    # A stopped live replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did
-    # after the stop (caught it, raised something else) is a consequence of the stop, not a finding.
+    # A stopped replay can't back up a verdict, so its assertions are not evaluated. Whatever the agent did after the
+    # stop (caught it, raised something else) is a consequence of the stop, not a finding. A tool output that changed
+    # before the stop is a finding: the replay fails on it, and the stop is the change's consequence.
     if stop is not None:
         error = stop.message
+        if tool_changes:
+            failures.extend(c.message for c in tool_changes if c.message)
+            failures.append(
+                f"The replay then stopped at step {stop.step} ('{stop.step_name}'), whose input follows from the "
+                "changed output.")
     else:
         if error:
             failures.append(f"Replay threw exception: {error}")
@@ -467,8 +474,7 @@ def _replay_result(
         if binding_failure:
             failures.append(binding_failure)
         # A changed tool output is reported even when the agent then raised: the change is likely why it did.
-        if fidelity is not None:
-            failures.extend(c.message for c in fidelity.tool_output_changes if c.message)
+        failures.extend(c.message for c in tool_changes if c.message)
         # Like the binding failure: when the agent raised, the exception already explains why a fault never fired.
         if fidelity is not None and not error:
             failures.extend(fidelity._unfired_fault_failures(lambda name: sum(1 for s in ctx.steps if s.name == name)))
@@ -483,7 +489,8 @@ def _replay_result(
 
     return ReplayResult(
         failures=failures,
-        inconclusive=stop,
+        # Failed, not inconclusive, when a tool output changed before the stop.
+        inconclusive=None if tool_changes else stop,
         replayed_context=ctx,
         recording_diff=recording_diff,
         fidelity=fidelity,

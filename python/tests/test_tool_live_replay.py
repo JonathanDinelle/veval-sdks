@@ -65,7 +65,9 @@ def test_unchanged_tool_runs_for_real_model_from_recording_passes():
     assert result.output == "The lamp costs EUR 12.50."
     assert [c.changed for c in result.fidelity.tool_checks] == [False]
     assert result.replayed_context.steps[1].metadata["_source"] == "live_tool"
-    assert "1 tools replayed, 0 not replayed, 0 outputs changed" in result.summary
+    assert result.summary == (
+        "passed — 3/3 recorded steps used, 0 diverged but served, 1 tool replayed, 0 not replayed, "
+        "0 outputs changed, stayed on path")
 
 
 def test_changed_tool_fails_with_both_outputs_and_the_agent_gets_the_new_output():
@@ -77,6 +79,49 @@ def test_changed_tool_fails_with_both_outputs_and_the_agent_gets_the_new_output(
     assert result.fidelity.tool_output_changes[0].actual_output == "EUR 1250"
     assert result.replayed_context.steps[2].input == "price: EUR 1250"
     assert "1 output changed" in result.summary
+
+
+def test_changed_tool_feeding_another_tool_fails_on_the_change_not_inconclusive():
+    # Recorded pipeline: format_price, then the agent's code passes its output to render_label (no model in between).
+    t = trace()
+    t.steps.insert(2, recorded("render_label", "EUR 12.50", "[EUR 12.50]", "tool"))
+
+    def run(ctx):
+        product = ctx.track_step("pick_product", ctx.input, lambda: "x")
+        price = ctx.track_step("format_price", product, lambda: "EUR 1250", TOOL)
+        return ctx.track_step("render_label", price, lambda: f"[{price}]", TOOL)
+    result = sdk().replay(t, run, tool_live())
+
+    assert result.outcome == "failed"
+    assert result.inconclusive is None
+    assert result.failures == [
+        "Tool output changed: 'format_price' (recorded step 2) ran with its recorded input and returned "
+        '"EUR 1250" instead of "EUR 12.50".',
+        "The replay then stopped at step 3 ('render_label'), whose input follows from the changed output.",
+    ]
+    assert "An earlier tool's output changed" in result.fidelity.stop.message
+    assert result.summary.startswith("failed (2 failures)")
+    assert result.summary.endswith("left the path")
+
+
+def test_external_state_tool_with_a_changed_input_is_reported_as_diverged_not_hidden_as_not_replayed():
+    def run(ctx):
+        ctx.track_step("pick_product", ctx.input, lambda: "x")
+        return ctx.track_step("format_price", "LAMP", lambda: "live", TOOL)
+    result = sdk().replay(trace(), run, tool_live(
+        step_rules={"format_price": ReplayStepRule(reads_external_state=True)}))
+
+    assert next(b for b in result.fidelity.bindings if b.step_name == "format_price").kind == "diverged"
+    assert result.fidelity.not_replayed == 0
+
+
+def test_tool_without_a_recorded_input_says_so_when_it_stops():
+    t = trace()
+    t.steps[1].input = None
+    result = sdk().replay(t, agent(lambda p: "EUR 12.50"), tool_live())
+
+    assert result.outcome == "inconclusive"
+    assert "The recording has no input for this tool" in result.inconclusive.message
 
 
 def test_object_outputs_compare_ignoring_key_order_and_ignored_fields():
