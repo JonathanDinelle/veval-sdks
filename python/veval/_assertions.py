@@ -7,6 +7,11 @@ if TYPE_CHECKING:
     from ._context import VevalExecutionContext
 
 
+def _is_injected_fault(step: Step) -> bool:
+    """Whether replay served this step an injected fault (ReplayOptions.faults)."""
+    return step.metadata.get("_source") == "fault"
+
+
 class ITraceAssertion:
     async def evaluate_async(self, ctx: VevalExecutionContext) -> Optional[str]:
         raise NotImplementedError
@@ -30,10 +35,33 @@ class TraceAssert:
         return _Assertion()
 
     @staticmethod
+    def max_attempts(step_name: str, max: int) -> ITraceAssertion:
+        """Fails when the step was called more than max times after its first failed call: an error, or an injected
+        fault (ReplayOptions.faults), malformed outputs included. With a fault that fails the first call,
+        max_attempts("search", 2) allows two retries. A step that never failed fails the assertion, since there were
+        no attempts to count."""
+        if max < 0:
+            raise ValueError("max_attempts can't be negative.")
+
+        class _Assertion(ITraceAssertion):
+            async def evaluate_async(self, ctx: VevalExecutionContext) -> Optional[str]:
+                calls = [s for s in _flatten_steps(ctx.steps) if s.name == step_name]
+                first_failure = next(
+                    (i for i, s in enumerate(calls) if s.status == "error" or _is_injected_fault(s)), None)
+                if first_failure is None:
+                    return (f"MaxAttempts: '{step_name}' was never called" if not calls else
+                            f"MaxAttempts: '{step_name}' never failed in {len(calls)} call(s), so there were no attempts to count")
+                attempts = len(calls) - first_failure - 1
+                return (f"MaxAttempts: expected at most {max} call(s) of '{step_name}' after its first failure, got {attempts}"
+                        if attempts > max else None)
+        return _Assertion()
+
+    @staticmethod
     def no_errors() -> ITraceAssertion:
         class _Assertion(ITraceAssertion):
             async def evaluate_async(self, ctx: VevalExecutionContext) -> Optional[str]:
-                errors = [s.name for s in _flatten_steps(ctx.steps) if s.status == "error"]
+                # An injected fault is the test's doing, not the agent's.
+                errors = [s.name for s in _flatten_steps(ctx.steps) if s.status == "error" and not _is_injected_fault(s)]
                 return f"NoErrors: found {len(errors)} step(s) with error status: {', '.join(errors)}" if errors else None
         return _Assertion()
 

@@ -10,7 +10,10 @@ from ._assertions import ITraceAssertion
 from ._scenarios import ScenarioItem, ScenarioOptions, ScenarioRunResult, ItemRunResult
 from ._http_client import VevalHttpClient
 from ._scenario_report import ScenarioReport
-from ._sdk import VevalSdk, _call_agent, _evaluate, _missing_trace_message, _scenario_options, _scenario_replay_options
+from ._sdk import (
+    _SYNTHETIC_ITEM_FAULTS_MESSAGE, VevalSdk, _call_agent, _evaluate, _missing_trace_message, _scenario_options,
+    _scenario_replay_options,
+)
 
 T = TypeVar("T")
 
@@ -156,7 +159,8 @@ class VevalTestSdk(VevalSdk):
                         trace, agent,
                         # The test double never makes live model calls: trace-backed items always replay mocked.
                         _scenario_replay_options(
-                            item, ScenarioOptions(mock_model_steps=True, step_rules=options.step_rules),
+                            item,
+                            ScenarioOptions(mock_model_steps=True, step_rules=options.step_rules, faults=options.faults),
                             effective_assertions,
                         ),
                     )
@@ -176,6 +180,8 @@ class VevalTestSdk(VevalSdk):
                         )
                         await report.send_trace_async(payload)
 
+            elif item.faults:
+                item_result.failures.append(_SYNTHETIC_ITEM_FAULTS_MESSAGE)
             elif item.input is not None:
                 ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", item.input)
                 try:

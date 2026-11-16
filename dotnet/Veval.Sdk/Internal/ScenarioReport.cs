@@ -41,6 +41,7 @@ internal sealed class ScenarioReport
         pass_count = result.PassCount,
         fail_count = result.FailCount,
         inconclusive_count = result.InconclusiveCount,
+        inconclusive_after_fault_count = result.InconclusiveAfterFaultCount,
         max_inconclusive_rate = result.MaxInconclusiveRate,
         summary = result.Summary,
         results = result.Results.Select(r => new
@@ -55,16 +56,25 @@ internal sealed class ScenarioReport
                 {
                     step = stop.Step,
                     step_name = stop.StepName,
-                    reason = stop.Reason == ReplayStopReason.Diverged ? "diverged" : "no_recording",
+                    reason = ReasonName(stop.Reason),
                     recorded_input = stop.RecordedInput,
                     actual_input = stop.ActualInput,
                     message = stop.Message,
                 }
                 : null,
             summary = r.Summary,
+            // Each injected fault and how many times it fired, so the run shows which items tested a failure path.
+            faults = r.Faults.Select(f => new { description = f.Fault.Description, step_name = f.Fault.StepName, fired = f.Fired }),
             failures = r.Failures,
             judgments = r.Context?.Judgments ?? (IReadOnlyList<JudgeRecord>)Array.Empty<JudgeRecord>(),
         }),
+    };
+
+    private static string ReasonName(ReplayStopReason reason) => reason switch
+    {
+        ReplayStopReason.Diverged => "diverged",
+        ReplayStopReason.AfterFault => "after_fault",
+        _ => "no_recording",
     };
 
     private static string OutcomeName(ReplayOutcome outcome) => outcome switch

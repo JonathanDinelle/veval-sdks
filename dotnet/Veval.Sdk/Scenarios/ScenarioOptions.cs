@@ -16,6 +16,14 @@ public class ScenarioOptions
     public Dictionary<string, ReplayStepRule> StepRules { get; set; } = new();
 
     /// <summary>
+    /// <see cref="ReplayOptions.Faults"/> for every trace-backed item, before the item's own
+    /// <see cref="ScenarioItem.Faults"/>. Each item's replay gets its own count, so a fault that never fires in an item
+    /// fails that item. An item that stops after a fault is inconclusive and always fails the run: the
+    /// <see cref="MaxInconclusiveRate"/> allowance is for live replays that leave their recording, not for fault tests.
+    /// </summary>
+    public List<ReplayFault> Faults { get; set; } = new();
+
+    /// <summary>
     /// The largest share of replayed items (0 to 1) that may be inconclusive in a passing run. Defaults to 0: any inconclusive item
     /// fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
     /// some items needing a real run, e.g. 0.1 for one in ten.

@@ -11,6 +11,14 @@ public static class TraceAssert
     public static ITraceAssertion ToolCalled(string toolName) => new ToolCalledAssertion(toolName);
 
     /// <summary>
+    /// Fails when the step was called more than <paramref name="max"/> times after its first failed call: an error,
+    /// or an injected fault (<see cref="ReplayOptions.Faults"/>), malformed outputs included. With a fault that fails
+    /// the first call, <c>MaxAttempts("search", 2)</c> allows two retries. A step that never failed fails the assertion,
+    /// since there were no attempts to count.
+    /// </summary>
+    public static ITraceAssertion MaxAttempts(string stepName, int max) => new MaxAttemptsAssertion(stepName, max);
+
+    /// <summary>
     /// Scores the trace's output against a rubric using an LLM judge, evaluated server-side.
     /// </summary>
     public static ITraceAssertion Judge(IVevalSdk veval, string criteria, JudgeOptions? options = null) =>
@@ -65,7 +73,8 @@ public static class TraceAssert
             var errors = new List<string>();
             foreach (var s in steps)
             {
-                if (s.Status == "error")
+                // An injected fault is the test's doing, not the agent's.
+                if (s.Status == "error" && !Internal.Faults.IsInjected(s))
                     errors.Add(s.Name);
                 errors.AddRange(FindErrors(s.Children));
             }
@@ -167,6 +176,36 @@ public static class TraceAssert
             }
             return false;
         }
+    }
+
+    private class MaxAttemptsAssertion : ITraceAssertion
+    {
+        private readonly string _stepName;
+        private readonly int _max;
+
+        public MaxAttemptsAssertion(string stepName, int max)
+        {
+            if (max < 0) throw new ArgumentOutOfRangeException(nameof(max), max, "MaxAttempts can't be negative.");
+            _stepName = stepName;
+            _max = max;
+        }
+
+        public Task<string?> EvaluateAsync(VevalExecutionContext ctx)
+        {
+            var calls = Flatten(ctx.Steps).Where(s => s.Name == _stepName).ToList();
+            var firstFailure = calls.FindIndex(s => s.Status == "error" || Internal.Faults.IsInjected(s));
+            if (firstFailure < 0)
+                return Task.FromResult<string?>(calls.Count == 0
+                    ? $"MaxAttempts: '{_stepName}' was never called"
+                    : $"MaxAttempts: '{_stepName}' never failed in {calls.Count} call(s), so there were no attempts to count");
+            var attempts = calls.Count - firstFailure - 1;
+            return Task.FromResult(attempts > _max
+                ? $"MaxAttempts: expected at most {_max} call(s) of '{_stepName}' after its first failure, got {attempts}"
+                : null);
+        }
+
+        private static IEnumerable<Step> Flatten(IReadOnlyList<Step> steps) =>
+            steps.SelectMany(s => new[] { s }.Concat(Flatten(s.Children)));
     }
 
     private class ToolCalledAssertion : ITraceAssertion

@@ -15,6 +15,10 @@ public class ItemRunResult
     public ReplayStop? Inconclusive { get; set; }
     /// <summary>How the item's replay was bound to its recording; null for a synthetic item or a missing trace.</summary>
     public ReplayFidelity? Fidelity { get; set; }
+    /// <summary>Each fault injected into the item's replay and how many times it fired; empty when none was declared.</summary>
+    public IReadOnlyList<FaultReport> Faults => Fidelity?.Faults ?? Array.Empty<FaultReport>();
+    /// <summary>The item stopped because an injected fault sent it off its recording (<see cref="ReplayStopReason.AfterFault"/>).</summary>
+    public bool InconclusiveAfterFault => Inconclusive?.Reason == ReplayStopReason.AfterFault;
     /// <summary>The item was a replay of a recorded trace (only a replay can be inconclusive).</summary>
     public bool Replayed => Fidelity != null || Inconclusive != null;
     public VevalExecutionContext? Context { get; set; }

@@ -28,13 +28,18 @@ public class ReplayStepRule
     public OnDivergence? OnDivergence { get; set; }
 }
 
-/// <summary>Why a live replay stopped.</summary>
+/// <summary>Why a replay stopped.</summary>
 public enum ReplayStopReason
 {
     /// <summary>The call's input matched no unused recording of its step, and the step stops on divergence.</summary>
     Diverged,
     /// <summary>The recording has no unused call of that step to serve, and it isn't a model step that can run live.</summary>
     NoRecording,
+    /// <summary>
+    /// An injected fault (<see cref="ReplayOptions.Faults"/>) sent the agent off its recording: this call matches no
+    /// unused recording. Past the fault the recording can't say what the real step would return.
+    /// </summary>
+    AfterFault,
 }
 
 /// <summary>

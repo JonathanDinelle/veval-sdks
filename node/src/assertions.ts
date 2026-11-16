@@ -1,5 +1,5 @@
 import { Step } from "./step";
-import { VevalExecutionContext } from "./context";
+import { VevalExecutionContext, isInjectedFault } from "./context";
 import { SnapshotComparer, SnapshotData, SnapshotOptions } from "./snapshots";
 
 export interface ITraceAssertion {
@@ -55,10 +55,35 @@ export const TraceAssert = {
     };
   },
 
+  /**
+   * Fails when the step was called more than `max` times after its first failed call: an error, or an injected fault
+   * (`ReplayOptions.faults`), malformed outputs included. With a fault that fails the first call,
+   * `maxAttempts("search", 2)` allows two retries. A step that never failed fails the assertion, since there were no
+   * attempts to count.
+   */
+  maxAttempts(stepName: string, max: number): ITraceAssertion {
+    if (!(max >= 0)) throw new RangeError("maxAttempts can't be negative.");
+    return {
+      async evaluate(ctx) {
+        const calls = flattenSteps(ctx.steps).filter((s) => s.name === stepName);
+        const firstFailure = calls.findIndex((s) => s.status === "error" || isInjectedFault(s));
+        if (firstFailure < 0)
+          return calls.length === 0
+            ? `MaxAttempts: '${stepName}' was never called`
+            : `MaxAttempts: '${stepName}' never failed in ${calls.length} call(s), so there were no attempts to count`;
+        const attempts = calls.length - firstFailure - 1;
+        return attempts > max
+          ? `MaxAttempts: expected at most ${max} call(s) of '${stepName}' after its first failure, got ${attempts}`
+          : null;
+      },
+    };
+  },
+
   noErrors(): ITraceAssertion {
     return {
       async evaluate(ctx) {
-        const errors = flattenSteps(ctx.steps).filter((s) => s.status === "error");
+        // An injected fault is the test's doing, not the agent's.
+        const errors = flattenSteps(ctx.steps).filter((s) => s.status === "error" && !isInjectedFault(s));
         return errors.length > 0
           ? `NoErrors: found ${errors.length} step(s) with error status: ${errors.map((s) => s.name).join(", ")}`
           : null;

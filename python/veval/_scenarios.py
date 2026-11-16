@@ -2,7 +2,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional, TYPE_CHECKING
 from ._assertions import ITraceAssertion
-from ._fidelity import ReplayFidelity, ReplayStepRule, ReplayStop
+from ._faults import FaultReport, ReplayFault
+from ._fidelity import STOP_AFTER_FAULT, ReplayFidelity, ReplayStepRule, ReplayStop
 from ._summary import replay_summary, scenario_summary
 
 if TYPE_CHECKING:
@@ -21,6 +22,11 @@ class ScenarioOptions:
     # fails the run, so a change that sends every item off its recorded path can't look green. Raise it to accept
     # some items needing a real run, e.g. 0.1 for one in ten.
     max_inconclusive_rate: float = 0.0
+    # ReplayOptions.faults for every trace-backed item, before the item's own faults. Each item's replay gets its own
+    # count, so a fault that never fires in an item fails that item. An item that stops after a fault is inconclusive
+    # and always fails the run: the max_inconclusive_rate allowance is for live replays that leave their recording,
+    # not for fault tests.
+    faults: list[ReplayFault] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         _check_rate(self.max_inconclusive_rate)
@@ -45,6 +51,9 @@ class ScenarioItem:
     mock_model_steps: bool = False
     # For a trace-backed item: ReplayOptions.step_rules for its replay. Replaces the scenario-level rule of the same step.
     step_rules: dict[str, ReplayStepRule] = field(default_factory=dict)
+    # For a trace-backed item: ReplayOptions.faults for its replay, added after the scenario's faults. A synthetic item
+    # (no trace_id) can't take faults and fails.
+    faults: list[ReplayFault] = field(default_factory=list)
 
 
 @dataclass
@@ -61,6 +70,16 @@ class ItemRunResult:
     def passed(self) -> bool:
         """True only when the item passed; False when it failed or was inconclusive."""
         return len(self.failures) == 0 and self.inconclusive is None
+
+    @property
+    def faults(self) -> list[FaultReport]:
+        """Each fault injected into the item's replay and how many times it fired; empty when none was declared."""
+        return self.fidelity.faults if self.fidelity is not None else []
+
+    @property
+    def inconclusive_after_fault(self) -> bool:
+        """The item stopped because an injected fault sent it off its recording (reason "after_fault")."""
+        return self.inconclusive is not None and self.inconclusive.reason == STOP_AFTER_FAULT
 
     @property
     def replayed(self) -> bool:
@@ -88,9 +107,10 @@ class ScenarioRunResult:
 
     @property
     def passed(self) -> bool:
-        """True when no item failed and the share of inconclusive items is within max_inconclusive_rate (by default,
-        none may be inconclusive)."""
-        return self.fail_count == 0 and self.inconclusive_rate <= self.max_inconclusive_rate
+        """True when no item failed, no item stopped after an injected fault, and the share of other inconclusive items
+        is within max_inconclusive_rate (by default, none may be inconclusive)."""
+        return (self.fail_count == 0 and self.inconclusive_after_fault_count == 0
+                and self.inconclusive_rate <= self.max_inconclusive_rate)
 
     @property
     def pass_count(self) -> int:
@@ -107,20 +127,32 @@ class ScenarioRunResult:
         return sum(1 for r in self.results if r.inconclusive is not None)
 
     @property
+    def inconclusive_after_fault_count(self) -> int:
+        """Inconclusive items that stopped after an injected fault, included in inconclusive_count. They are left out of
+        inconclusive_rate and always fail the run: the fault test couldn't be judged, which no allowance should hide."""
+        return sum(1 for r in self.results if r.inconclusive_after_fault)
+
+    def _replayed_on_live_terms(self) -> int:
+        """Replayed items, leaving out those stopped by a fault: the rates measure how far live replay stays on path."""
+        return sum(1 for r in self.results if r.replayed and not r.inconclusive_after_fault)
+
+    @property
     def inconclusive_rate(self) -> float:
-        """Inconclusive items as a share of replayed items, from 0 to 1. Only a replay can be inconclusive, so
-        synthetic items don't dilute it."""
-        replayed = sum(1 for r in self.results if r.replayed)
-        return self.inconclusive_count / replayed if replayed else 0.0
+        """Inconclusive items as a share of replayed items, from 0 to 1, leaving out items that stopped after an
+        injected fault. Only a replay can be inconclusive, so synthetic items don't dilute it."""
+        replayed = self._replayed_on_live_terms()
+        other = self.inconclusive_count - self.inconclusive_after_fault_count
+        return other / replayed if replayed else 0.0
 
     @property
     def stayed_on_path_rate(self) -> Optional[float]:
         """Replayed items that stayed on their recorded path (didn't stop), as a share of replayed items; None when no
-        item was replayed. How far live replay can be trusted for this change."""
-        replayed = sum(1 for r in self.results if r.replayed)
+        item was replayed. How far live replay can be trusted for this change. Items that stopped after an injected
+        fault are left out: the fault sent them off the path."""
+        replayed = self._replayed_on_live_terms()
         if not replayed:
             return None
-        return (replayed - self.inconclusive_count) / replayed
+        return (replayed - (self.inconclusive_count - self.inconclusive_after_fault_count)) / replayed
 
     @property
     def summary(self) -> str:

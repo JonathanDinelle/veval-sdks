@@ -12,8 +12,9 @@ export function replaySummary(failures: string[], stop: ReplayStop | null | unde
 
   const used = new Set(fidelity.bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index)).size;
   const recorded = used + fidelity.unused.length;
+  const faults = fidelity.faults.length > 0 ? `${count(fidelity.faulted, "fault")} injected, ` : "";
   return `${head} — ${used}/${recorded} recorded steps used, ${fidelity.diverged} diverged but served, ${fidelity.live} live, ` +
-    (stop ? "left the path" : "stayed on path");
+    faults + (stop ? "left the path" : "stayed on path");
 }
 
 /** @internal The one-line summary on a scenario run result. */
@@ -22,21 +23,26 @@ export function scenarioSummary(r: {
   pass_count: number;
   fail_count: number;
   inconclusive_count: number;
+  inconclusive_after_fault_count: number;
   inconclusive_rate: number;
   max_inconclusive_rate: number;
   replayed: number;
   stayed_on_path: number;
 }): string {
   const tooManyInconclusive = r.inconclusive_rate > r.max_inconclusive_rate;
+  const afterFault = r.inconclusive_after_fault_count;
+  const otherInconclusive = r.inconclusive_count - afterFault;
   // The reason comes first: "failed ... 0 failed" would otherwise read like a bug.
   const head = r.passed ? "passed"
+    : r.fail_count === 0 && afterFault > 0 ? "failed: inconclusive after a fault"
     : r.fail_count === 0 && tooManyInconclusive ? "failed: too many inconclusive"
     : "failed";
-  let line = `${head} — ${r.pass_count} passed, ${r.fail_count} failed, ${r.inconclusive_count} inconclusive`;
-  if (r.inconclusive_count > 0)
+  let line = `${head} — ${r.pass_count} passed, ${r.fail_count} failed, ${otherInconclusive} inconclusive`;
+  if (otherInconclusive > 0)
     line += tooManyInconclusive
       ? ` (${percent(r.inconclusive_rate)} of replays > ${percent(r.max_inconclusive_rate)} allowed)`
       : ` (${percent(r.inconclusive_rate)} of replays, within ${percent(r.max_inconclusive_rate)} allowed)`;
+  if (afterFault > 0) line += `, ${afterFault} inconclusive after a fault`;
   if (r.replayed > 0) line += `, ${r.stayed_on_path}/${r.replayed} replays stayed on path`;
   return line;
 }

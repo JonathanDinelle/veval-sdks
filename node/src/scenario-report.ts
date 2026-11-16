@@ -37,19 +37,25 @@ export class ScenarioReport {
       r.outcome = r.inconclusive ? "inconclusive" : r.passed ? "passed" : "failed";
       r.replayed = !!r.fidelity || !!r.inconclusive;
       r.summary = replaySummary(r.failures, r.inconclusive, r.fidelity);
+      r.faults = r.fidelity?.faults ?? [];
+      r.inconclusive_after_fault = r.inconclusive?.reason === "after_fault";
     }
     const passCount = results.filter((r) => r.outcome === "passed").length;
     const inconclusiveCount = results.filter((r) => r.outcome === "inconclusive").length;
+    const afterFault = results.filter((r) => r.inconclusive_after_fault).length;
     const failCount = results.length - passCount - inconclusiveCount;
-    // Only a replay can be inconclusive, so synthetic items don't dilute the rate.
-    const replayed = results.filter((r) => r.replayed).length;
-    const stayedOnPath = replayed - inconclusiveCount;
-    const inconclusiveRate = replayed === 0 ? 0 : inconclusiveCount / replayed;
+    // Only a replay can be inconclusive, so synthetic items don't dilute the rate. Items stopped by a fault are counted
+    // on their own: the rate measures how far live replay stays on its recording.
+    const replayed = results.filter((r) => r.replayed && !r.inconclusive_after_fault).length;
+    const otherInconclusive = inconclusiveCount - afterFault;
+    const stayedOnPath = replayed - otherInconclusive;
+    const inconclusiveRate = replayed === 0 ? 0 : otherInconclusive / replayed;
     const counts = {
-      passed: failCount === 0 && inconclusiveRate <= maxInconclusiveRate,
+      passed: failCount === 0 && afterFault === 0 && inconclusiveRate <= maxInconclusiveRate,
       pass_count: passCount,
       fail_count: failCount,
       inconclusive_count: inconclusiveCount,
+      inconclusive_after_fault_count: afterFault,
       inconclusive_rate: inconclusiveRate,
       max_inconclusive_rate: maxInconclusiveRate,
     };
@@ -68,6 +74,7 @@ export class ScenarioReport {
       pass_count: result.pass_count,
       fail_count: result.fail_count,
       inconclusive_count: result.inconclusive_count,
+      inconclusive_after_fault_count: result.inconclusive_after_fault_count,
       max_inconclusive_rate: result.max_inconclusive_rate,
       summary: result.summary,
       results: result.results.map((r) => ({
@@ -87,6 +94,8 @@ export class ScenarioReport {
             }
           : null,
         summary: r.summary,
+        // Each injected fault and how many times it fired, so the run shows which items tested a failure path.
+        faults: (r.faults ?? []).map((f) => ({ description: f.fault.description, step_name: f.fault.step_name, fired: f.fired })),
         failures: r.failures,
         judgments: r.context?.judgments ?? [],
       })),

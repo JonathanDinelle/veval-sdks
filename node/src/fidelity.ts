@@ -1,3 +1,5 @@
+import { FaultReport, ReplayFault } from "./faults";
+
 /** How a replayed call was bound to the recording. */
 export type ReplayBindingKind =
   /** Served the recorded step with the same name and an identical input. */
@@ -5,7 +7,9 @@ export type ReplayBindingKind =
   /** No recorded step with that name had an identical input; served the next unused one in recorded order. */
   | "diverged"
   /** A model step that ran for real in a live replay (`live_model_steps`). */
-  | "live";
+  | "live"
+  /** Served an injected fault (`ReplayOptions.faults`) instead of running or using a recording. */
+  | "faulted";
 
 /** One replayed call and the recorded step bound to it. `recorded_index` is null for a live model call beyond the ones recorded. */
 export interface ReplayBinding {
@@ -44,12 +48,17 @@ export interface ReplayStepRule {
   on_divergence?: OnDivergence;
 }
 
-/** Why a live replay stopped. */
+/** Why a replay stopped. */
 export type ReplayStopReason =
   /** The call's input matched no unused recording of its step, and the step stops on divergence. */
   | "diverged"
   /** The recording has no unused call of that step to serve, and it isn't a model step that can run live. */
-  | "no_recording";
+  | "no_recording"
+  /**
+   * An injected fault (`ReplayOptions.faults`) sent the agent off its recording: this call matches no unused
+   * recording. Past the fault the recording can't say what the real step would return.
+   */
+  | "after_fault";
 
 /**
  * Where a live replay left its recording and stopped. Past this step nobody knows what the real tools would have
@@ -80,6 +89,24 @@ export class ReplayStoppedError extends Error {
   }
 }
 
+/**
+ * Thrown from a step when replay serves a recording of that step that failed in the recorded run, so the agent's retry
+ * or fallback runs as it did then. It carries the recorded error message, not the original error's class: code that
+ * only catches a specific error type won't catch it.
+ */
+export class RecordedStepError extends Error {
+  readonly step_name: string;
+  /** The error the recorded step failed with, or null when the recording didn't keep one. */
+  readonly recorded_error: string | null;
+
+  constructor(stepName: string, recordedError: string | null) {
+    super(`Step '${stepName}' failed in the recorded run: ${recordedError ?? "no error message recorded"}`);
+    this.name = "RecordedStepError";
+    this.step_name = stepName;
+    this.recorded_error = recordedError;
+  }
+}
+
 /** A recorded step the replay never called. */
 export interface UnusedRecording {
   step_name: string;
@@ -94,10 +121,18 @@ export class ReplayFidelity {
   private readonly _bindings: ReplayBinding[] = [];
   private _unused: UnusedRecording[];
   private _stop: ReplayStop | null = null;
+  private readonly _faults: ReplayFault[];
+  private readonly _fired: number[];
+  private _firstFired: ReplayFault | null = null;
+  /** Recordings from this index on may go unused: a fault that fails every call fired there. Null while none has. */
+  private _unusedExcusedFrom: number | null = null;
+  private readonly _neverExcused = new Set<number>();
 
   /** @internal */
-  constructor(recorded: UnusedRecording[]) {
+  constructor(recorded: UnusedRecording[], faults: ReplayFault[] = []) {
     this._unused = [...recorded];
+    this._faults = [...faults];
+    this._fired = faults.map(() => 0);
   }
 
   /** Each replayed call, in call order. */
@@ -121,6 +156,51 @@ export class ReplayFidelity {
   /** Model steps that ran for real in a live replay. */
   get live(): number {
     return this._bindings.filter((b) => b.kind === "live").length;
+  }
+
+  /** Calls served an injected fault. */
+  get faulted(): number {
+    return this._bindings.filter((b) => b.kind === "faulted").length;
+  }
+
+  /** Each fault in `ReplayOptions.faults` and how many times it fired, in declared order. */
+  get faults(): FaultReport[] {
+    return this._faults.map((fault, i) => ({ fault, fired: this._fired[i], triggered: this._fired[i] > 0 }));
+  }
+
+  /** @internal The first fault that fired, or null while none has. */
+  get firstFired(): ReplayFault | null {
+    return this._firstFired;
+  }
+
+  /** @internal */
+  get declaredFaults(): readonly ReplayFault[] {
+    return this._faults;
+  }
+
+  /** @internal */
+  firedCount(faultIndex: number): number {
+    return this._fired[faultIndex];
+  }
+
+  /**
+   * @internal `firstMatchingRecording`: the first unused recording the fault would have hit, or null; for a fault
+   * that fails every call, recordings from there on are excused. `untargeted`: recordings of the faulted step the
+   * fault would never have hit (other inputs, earlier calls); they are never excused, since the fault gives the agent
+   * no reason to skip them.
+   */
+  fired(faultIndex: number, firstMatchingRecording: number | null, untargeted: number[]): void {
+    this._fired[faultIndex]++;
+    const fault = this._faults[faultIndex];
+    this._firstFired ??= fault;
+    if (fault.count !== null || this._fired[faultIndex] > 1) return;
+    for (const index of untargeted) this._neverExcused.add(index);
+
+    // A fault that fails every call sends the agent down its fallback path from here: recordings of the faulted step
+    // and everything after it may rightly go unused. Recordings before it were the agent's to call.
+    const used = this._bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index! + 1);
+    const from = firstMatchingRecording ?? Math.max(0, ...used);
+    this._unusedExcusedFrom = this._unusedExcusedFrom === null ? from : Math.min(this._unusedExcusedFrom, from);
   }
 
   /** No call diverged and every recorded step was called. Live calls don't count against it. */
@@ -154,12 +234,33 @@ export class ReplayFidelity {
     return liveModelSteps ? this.noLiveStepFailure(traceId) : this.unusedFailure(traceId);
   }
 
-  /** @internal The failure for recorded steps that were never called, or null when every recording was used. */
+  /** @internal One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing. */
+  unfiredFaultFailures(callsOf: (stepName: string) => number): string[] {
+    return this._faults
+      .filter((_, i) => this._fired[i] === 0)
+      .map((f) => {
+        const calls = callsOf(f.step_name);
+        const why = calls === 0
+          ? `the agent never called '${f.step_name}'`
+          : `none of the ${calls} call(s) of '${f.step_name}' matched it`;
+        return `Fault not triggered: ${f.description} never fired: ${why}. The failure path it was meant to test did not run.`;
+      });
+  }
+
+  /**
+   * @internal The failure for recorded steps that were never called, or null when every recording was used. After a
+   * fault that fails every call, recordings from the faulted step on are excused: the agent took its fallback path.
+   * Recordings of that step the fault doesn't target (another input, an earlier call) are not. A fault limited with
+   * `times(n)` is expected to rejoin the recording.
+   */
   unusedFailure(traceId: string): string | null {
-    if (this._unused.length === 0) return null;
-    const steps = this._unused.map((u) => `'${u.step_name}' (recorded step ${u.recorded_index + 1})`).join(", ");
+    const from = this._unusedExcusedFrom;
+    const unused = this._unused.filter(
+      (u) => from === null || u.recorded_index < from || this._neverExcused.has(u.recorded_index));
+    if (unused.length === 0) return null;
+    const steps = unused.map((u) => `'${u.step_name}' (recorded step ${u.recorded_index + 1})`).join(", ");
     return (
-      `Replay never called ${this._unused.length} recorded step(s) from trace ${traceId}: ${steps}. ` +
+      `Replay never called ${unused.length} recorded step(s) from trace ${traceId}: ${steps}. ` +
       "The agent skipped part of the recorded run, so its assertions may be passing on a path the recording does not cover."
     );
   }
