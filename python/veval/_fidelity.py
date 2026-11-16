@@ -8,10 +8,13 @@ from ._faults import FaultReport, ReplayFault
 #   "diverged" — no recorded step with that name had an identical input; served the next unused one in recorded order.
 #   "live"     — a model step that ran for real in a live replay (live_model_steps).
 #   "faulted"  — served an injected fault (ReplayOptions.faults) instead of running or using a recording.
+#   "not_replayed" — tool-live replay: a tool marked reads_external_state, served from the recording instead of running.
+# "live" is any step that ran for real: a model step in a live replay, a tool in a tool-live replay.
 MATCHED = "matched"
 DIVERGED = "diverged"
 LIVE = "live"
 FAULTED = "faulted"
+NOT_REPLAYED = "not_replayed"
 
 
 @dataclass(frozen=True)
@@ -52,6 +55,13 @@ class ReplayStepRule:
     match_on_name_only: bool = False
     # Input property names dropped at any depth before matching (e.g. "reasoning", "request_id").
     ignore_input_fields: set[str] = field(default_factory=set)
+    # Tool-live replay (live_tool_steps): output property names dropped at any depth before a tool's new output is
+    # compared with its recorded output, for values that change on every call (ids, timestamps).
+    ignore_output_fields: set[str] = field(default_factory=set)
+    # Tool-live replay: the tool reads state the recording doesn't hold (a live web page, a database, the clock), so
+    # running it again can't be compared with the recording. It is served from the recording and reported as not
+    # replayed, never as passed. Test such tools with real runs and assertions.
+    reads_external_state: bool = False
     # Live replay: what a diverged call does, "stop" or "serve". None uses ReplayOptions.stop_on_divergence_types:
     # stop when the step was recorded with one of those types, serve otherwise.
     on_divergence: Optional[str] = None
@@ -110,11 +120,30 @@ class UnusedRecording:
     recorded_index: int
 
 
+@dataclass(frozen=True)
+class ToolOutputCheck:
+    """Tool-live replay: one tool that ran for real, with its recorded and new outputs. changed when they differ (key
+    order and the step rule's ignore_output_fields aside). actual_output is the error message when the tool raised."""
+    step_name: str
+    # The 0-based position of the recording the call was compared with.
+    recorded_index: int
+    recorded_output: Any
+    actual_output: Any
+    changed: bool
+    # The failure for a changed output; None when the output matched.
+    message: Optional[str] = None
+
+
 class ReplayFidelity:
     """How faithfully a mocked replay followed its recording. A replay is faithful when every call matched a
     recorded step with an identical input and every recorded step was called."""
 
-    def __init__(self, recorded: Iterable[UnusedRecording], faults: Sequence[ReplayFault] = ()):
+    def __init__(
+        self, recorded: Iterable[UnusedRecording], faults: Sequence[ReplayFault] = (), live_tool_steps: bool = False,
+    ):
+        # The replay runs tools for real (ReplayOptions.live_tool_steps).
+        self.live_tool_steps = live_tool_steps
+        self._tool_checks: list[ToolOutputCheck] = []
         self._bindings: list[ReplayBinding] = []
         self._unused: list[UnusedRecording] = list(recorded)
         self._stop: Optional[ReplayStop] = None
@@ -202,7 +231,38 @@ class ReplayFidelity:
         agent raised, since the exception already explains the rest."""
         if live_model_steps:
             return self._no_live_step_failure(trace_id)
+        if self.live_tool_steps:
+            return self._no_tool_ran_failure(trace_id) or self._unused_failure(trace_id)
         return self._unused_failure(trace_id)
+
+    @property
+    def tool_checks(self) -> list[ToolOutputCheck]:
+        """Tool-live replay: each tool that ran for real and how its output compared, in call order."""
+        return list(self._tool_checks)
+
+    @property
+    def tool_output_changes(self) -> list[ToolOutputCheck]:
+        """Tool-live replay: the tools whose new output differs from the recording."""
+        return [c for c in self._tool_checks if c.changed]
+
+    @property
+    def not_replayed(self) -> int:
+        """Tool-live replay: tools served from the recording because they read external state."""
+        return sum(1 for b in self._bindings if b.kind == NOT_REPLAYED)
+
+    def _checked(self, check: ToolOutputCheck) -> None:
+        self._tool_checks.append(check)
+
+    def _no_tool_ran_failure(self, trace_id: str) -> Optional[str]:
+        """The failure for a tool-live replay in which no tool ran, or None when at least one did."""
+        if self._tool_checks:
+            return None
+        return (
+            f"Tool-live replay of trace {trace_id} ran no tool: none of the steps it called was recorded as type 'tool' "
+            + (f"except {self.not_replayed} that read external state, " if self.not_replayed else "")
+            + 'so no tool output was checked. Mark tool steps with StepOptions(type=StepType.TOOL) (or set_meta("type", "tool")) '
+            "and record a new trace."
+        )
 
     def _unfired_fault_failures(self, calls_of: Callable[[str], int]) -> list[str]:
         """One failure per declared fault that never fired: a fault test whose fault didn't fire tested nothing."""

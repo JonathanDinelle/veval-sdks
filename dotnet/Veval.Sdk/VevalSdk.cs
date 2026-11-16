@@ -166,15 +166,17 @@ public class VevalSdk : IVevalSdk
 
     /// <summary>
     /// How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
-    /// the whole scenario opts into mocked replay.
+    /// the whole scenario opts into tool-live replay (which wins) or mocked replay.
     /// </summary>
     internal static ReplayOptions ScenarioReplayOptions(ScenarioItem item, ScenarioOptions options, ITraceAssertion[] assertions)
     {
-        var mocked = options.MockModelSteps || item.MockModelSteps;
+        var liveTools = options.LiveToolSteps || item.LiveToolSteps;
+        var mocked = !liveTools && (options.MockModelSteps || item.MockModelSteps);
         return new ReplayOptions
         {
             MockLlmResponses = mocked,
-            LiveModelSteps = !mocked,
+            LiveModelSteps = !mocked && !liveTools,
+            LiveToolSteps = liveTools,
             Assertions = assertions,
             StepRules = MergeStepRules(options.StepRules, item.StepRules),
             Faults = options.Faults.Concat(item.Faults).ToList(),

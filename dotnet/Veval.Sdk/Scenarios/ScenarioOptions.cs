@@ -10,6 +10,14 @@ public class ScenarioOptions
     public bool MockModelSteps { get; set; }
 
     /// <summary>
+    /// Replay every trace-backed item tool-live (<see cref="ReplayOptions.LiveToolSteps"/>), as if each set
+    /// <see cref="ScenarioItem.LiveToolSteps"/>: tools run for real against their recorded inputs and the model is
+    /// served from the recording. Takes precedence over <see cref="MockModelSteps"/>. Allowed in
+    /// <see cref="VevalTestSdk"/>, since it makes no model calls.
+    /// </summary>
+    public bool LiveToolSteps { get; set; }
+
+    /// <summary>
     /// <see cref="ReplayOptions.StepRules"/> for every trace-backed item; an item's own <see cref="ScenarioItem.StepRules"/>
     /// entry for the same step replaces the scenario's.
     /// </summary>

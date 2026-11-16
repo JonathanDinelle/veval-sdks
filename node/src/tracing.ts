@@ -52,6 +52,15 @@ export interface ReplayOptions {
    * `mock_llm_responses`. The replay fails if no step ran live.
    */
   live_model_steps?: boolean;
+  /**
+   * Run steps recorded as `tool` for real and serve every other step, model steps included, from the recording. The
+   * model's path stays the recorded one, so each tool is called with its recorded input, and its new output is
+   * compared with the recorded output: a difference fails the replay. Catches a changed tool, which mocked and live
+   * replays serve from the recording and never run. Only for tools whose output follows from their input (parsers,
+   * formatters, lookups against fixed data); mark a tool that reads live state with `reads_external_state` in its
+   * `step_rules` entry. Can't be combined with `live_model_steps`. The replay fails if no tool ran.
+   */
+  live_tool_steps?: boolean;
   assertions: ITraceAssertion[];
   /**
    * When set, the replay also fails if its step sequence or step inputs drifted from the recorded trace.

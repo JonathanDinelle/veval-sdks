@@ -16,6 +16,9 @@ internal static class ResultSummary
         var used = fidelity.Bindings.Where(b => b.RecordedIndex != null).Select(b => b.RecordedIndex).Distinct().Count();
         var recorded = used + fidelity.Unused.Count;
         var faults = fidelity.Faults.Count > 0 ? $"{Count(fidelity.Faulted, "fault")} injected, " : "";
+        if (fidelity.LiveToolSteps)
+            faults += $"{fidelity.ToolChecks.Count} tools replayed, {fidelity.NotReplayed} not replayed, " +
+                      $"{Count(fidelity.ToolOutputChanges.Count, "output")} changed, ";
         return $"{head} — {used}/{recorded} recorded steps used, {fidelity.Diverged} diverged but served, {fidelity.Live} live, " +
                faults + (stop != null ? "left the path" : "stayed on path");
     }

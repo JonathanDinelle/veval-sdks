@@ -24,13 +24,15 @@ import { ScenarioReport } from "./scenario-report";
  */
 /**
  * How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
- * the whole scenario opts into mocked replay.
+ * the whole scenario opts into tool-live replay (which wins) or mocked replay.
  */
 export function scenarioReplayOptions(item: ScenarioItem, options: ScenarioOptions | undefined, assertions: ITraceAssertion[]): ReplayOptions {
-  const mocked = !!(options?.mock_model_steps || item.mock_model_steps);
+  const liveTools = !!(options?.live_tool_steps || item.live_tool_steps);
+  const mocked = !liveTools && !!(options?.mock_model_steps || item.mock_model_steps);
   return {
     mock_llm_responses: mocked,
-    live_model_steps: !mocked,
+    live_model_steps: !mocked && !liveTools,
+    live_tool_steps: liveTools,
     assertions,
     step_rules: mergeStepRules(options?.step_rules, item.step_rules),
     faults: [...(options?.faults ?? []), ...(item.faults ?? [])],
@@ -159,14 +161,19 @@ export class VevalSdk {
     callback: (ctx: VevalExecutionContext) => Promise<T>,
     options?: Partial<ReplayOptions>
   ): Promise<ReplayResult> {
-    if ((options?.faults?.length ?? 0) > 0 && !options?.mock_llm_responses && !options?.live_model_steps)
-      throw new Error("ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.");
+    if (options?.live_tool_steps && options?.live_model_steps)
+      throw new Error(
+        "ReplayOptions.live_tool_steps and live_model_steps can't be combined: one runs tools and serves the model from " +
+        "the recording, the other the reverse.");
+    if ((options?.faults?.length ?? 0) > 0 && !options?.mock_llm_responses && !options?.live_model_steps && !options?.live_tool_steps)
+      throw new Error(
+        "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses, live_model_steps or live_tool_steps.");
 
     const ctx = new VevalExecutionContext(`tr_${crypto.randomUUID().replace(/-/g, "")}`, trace.input);
     markAsReplay(ctx);
     if (options?.live_model_steps) {
       ctx.loadMockOutputs(trace, true, true, options);
-    } else if (options?.mock_llm_responses) {
+    } else if (options?.mock_llm_responses || options?.live_tool_steps) {
       ctx.loadMockOutputs(trace, true, false, options);
     }
 
@@ -196,6 +203,8 @@ export class VevalSdk {
       if (error) failures.push(`Replay threw exception: ${error}`);
       const bindingFailure = error ? null : ctx.replayFidelity?.failure(trace.trace_id, !!options?.live_model_steps);
       if (bindingFailure) failures.push(bindingFailure);
+      // A changed tool output is reported even when the agent then threw: the change is likely why it did.
+      failures.push(...(ctx.replayFidelity?.tool_output_changes.map((c) => c.message!) ?? []));
       // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
       if (!error)
         failures.push(...(ctx.replayFidelity?.unfiredFaultFailures((name) => ctx.steps.filter((s) => s.name === name).length) ?? []));

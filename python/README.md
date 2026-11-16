@@ -143,6 +143,8 @@ print("Passed" if replay.passed else replay.failures)
 
 Each call gets the recorded step with the same name and an identical input, or else the next unused one in recorded order, reported as diverged in `replay.fidelity`. A step with no recording raises instead of calling live, and a recorded step the agent never calls fails the replay.
 
+`ReplayOptions(live_tool_steps=True)` runs tool steps for real against their recorded inputs, serves the model from the recording, and fails when a tool's output changed (`ReplayStepRule(ignore_output_fields=...)` for volatile fields, `reads_external_state=True` for tools that read live state). Only for tools whose output follows from their input.
+
 To test failure paths, add faults: replay serves a timeout, an HTTP error, a rate limit, a malformed output or your own exception in place of a step's recorded output, so retries, fallbacks and guards run.
 
 ```python

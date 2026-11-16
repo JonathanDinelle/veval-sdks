@@ -72,6 +72,7 @@ function oneLine(value: unknown): string {
 
 /** Options for a replay's step binding: matching rules, and which diverged steps stop a live replay. @internal */
 export interface StepBindingOptions {
+  live_tool_steps?: boolean;
   step_rules?: Record<string, ReplayStepRule>;
   stop_on_divergence_types?: string[];
   faults?: ReplayFault[];
@@ -92,6 +93,7 @@ export class VevalExecutionContext {
   private _fidelity: ReplayFidelity | null = null;
   private _strictMockMode = false;
   private _liveModelSteps = false;
+  private _liveToolSteps = false;
   private _stepRules: Record<string, ReplayStepRule> = {};
   private _stopOnDivergenceTypes = new Set<string>();
   private _isReplay = false;
@@ -164,6 +166,8 @@ export class VevalExecutionContext {
       // In live mode a model step runs for real, including extra calls of a step recorded as a model step and
       // model steps the recording never contained.
       const runLive = this._liveModelSteps && effectiveType === "llm";
+      // In tool-live mode a tool runs for real against its recorded input; one that reads external state can't.
+      const runTool = this._liveToolSteps && effectiveType === "tool" && !rule?.reads_external_state;
       const conflictingType = knownType && declaredType && declaredType !== knownType ? declaredType : null;
 
       // After a fault, replay serves only calls that still match their recording: a fallback the recording never
@@ -173,7 +177,7 @@ export class VevalExecutionContext {
         throw this.stopAt(name, recorded === null ? "no_recording" : "diverged", recorded?.data.input ?? null, input, effectiveType);
 
       if (recorded === null && !runLive && this._strictMockMode) {
-        if (this._liveModelSteps) throw this.stopAt(name, "no_recording", null, input, effectiveType);
+        if (this._liveModelSteps || this._liveToolSteps) throw this.stopAt(name, "no_recording", null, input, effectiveType);
         const available = [...new Set(this._recorded.filter((r) => !r.consumed).map((r) => r.data.name))].join(", ");
         throw new Error(
           `Replay mode: no mock output for step '${name}'. ` +
@@ -185,6 +189,9 @@ export class VevalExecutionContext {
       // A live model handed a recording from another path would reason over a page it never reached.
       if (this._liveModelSteps && !runLive && recorded !== null && !exact && this.stopsOnDivergence(rule, effectiveType))
         throw this.stopAt(name, "diverged", recorded.data.input, input, effectiveType);
+      // A tool run with an input the recording doesn't have has no recorded output to be compared with.
+      if (runTool && recorded !== null && !exact)
+        throw this.stopAt(name, "diverged", recorded.data.input, input, effectiveType);
       if (recorded !== null) recorded.consumed = true;
 
       if (runLive) {
@@ -192,9 +199,16 @@ export class VevalExecutionContext {
           step_name: name, kind: "live", recorded_index: recorded?.index ?? null,
           recorded_input: recorded?.data.input ?? null, actual_input: input, declared_type: conflictingType,
         });
-      } else if (recorded !== null) {
+      } else if (runTool) {
         this._fidelity!.record({
-          step_name: name, kind: exact ? "matched" : "diverged", recorded_index: recorded.index,
+          step_name: name, kind: "live", recorded_index: recorded!.index,
+          recorded_input: recorded!.data.input, actual_input: input, declared_type: conflictingType,
+        });
+        return this.runToolAgainstRecording(name, input, fn, effectiveType, recorded!, rule);
+      } else if (recorded !== null) {
+        const kind = this._liveToolSteps && effectiveType === "tool" ? "not_replayed" : exact ? "matched" : "diverged";
+        this._fidelity!.record({
+          step_name: name, kind, recorded_index: recorded.index,
           recorded_input: recorded.data.input, actual_input: input, declared_type: conflictingType,
         });
         // A step that failed in the recorded run fails again, so the agent's retry or fallback runs as it did.
@@ -256,6 +270,7 @@ export class VevalExecutionContext {
     this._isReplay = true;
     this._strictMockMode = strict;
     this._liveModelSteps = liveModelSteps;
+    this._liveToolSteps = !liveModelSteps && !!options?.live_tool_steps;
     this._stepRules = options?.step_rules ?? {};
     this._stopOnDivergenceTypes = new Set(options?.stop_on_divergence_types ?? ["tool"]);
     this._recorded = trace.steps.map((data, index) => ({
@@ -266,7 +281,54 @@ export class VevalExecutionContext {
       keysIgnoring: new Map<string, string>(),
     }));
     this._fidelity = new ReplayFidelity(
-      this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })), options?.faults ?? []);
+      this._recorded.map((r) => ({ step_name: r.data.name, recorded_index: r.index })), options?.faults ?? [],
+      this._liveToolSteps);
+  }
+
+  /**
+   * Tool-live replay: runs the tool for real and compares its output, or its failure, with the recording. The agent
+   * gets the new output, so the code that reads it runs too; a difference is recorded and fails the replay.
+   */
+  private async runToolAgainstRecording<T>(
+    name: string, input: unknown, fn: ((handle: StepHandle) => Promise<T>) | (() => Promise<T>),
+    type: string | null, recorded: RecordedStep, rule: ReplayStepRule | undefined
+  ): Promise<T> {
+    const s = new Step(name);
+    s.input = input;
+    s.type = type ?? "tool";
+    s.metadata["_source"] = "live_tool";
+    this._steps.push(s);
+    const recordedFailed = recorded.data.status === "error";
+    const recordedOutput = recordedFailed ? recorded.data.error : recorded.data.output;
+    let result: T;
+    try {
+      result = fn.length === 0 ? await (fn as () => Promise<T>)() : await (fn as (h: StepHandle) => Promise<T>)(new StepHandle(s));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      s.fail(msg);
+      this.checkTool(name, recorded, recordedOutput, msg, !recordedFailed,
+        `threw (${msg}) where the recording returned ${oneLine(recordedOutput)}`);
+      throw err;
+    }
+    s.complete(result);
+
+    const ignore = new Set(rule?.ignore_output_fields ?? []);
+    const changed = recordedFailed || ignoringKey(result, ignore) !== ignoringKey(recordedOutput, ignore);
+    this.checkTool(name, recorded, recordedOutput, result, changed,
+      recordedFailed
+        ? `returned ${oneLine(result)} where the recording failed (${recordedOutput})`
+        : `returned ${oneLine(result)} instead of ${oneLine(recordedOutput)}`);
+    return result;
+  }
+
+  private checkTool(name: string, recorded: RecordedStep, recordedOutput: unknown, actualOutput: unknown, changed: boolean, how: string): void {
+    this._fidelity!.checked({
+      step_name: name, recorded_index: recorded.index, recorded_output: recordedOutput ?? null,
+      actual_output: actualOutput ?? null, changed,
+      message: changed
+        ? `Tool output changed: '${name}' (recorded step ${recorded.index + 1}) ran with its recorded input and ${how}.`
+        : null,
+    });
   }
 
   /** The index of the first declared fault that applies to this call of the step, or null. */
@@ -404,13 +466,17 @@ export class VevalExecutionContext {
           "match it on name only (step_rules)."
         : " If the model took a different path, record that path. If your code added this call, re-record, or " +
           "replay mocked to test this change.";
+    if (this._liveToolSteps && !fault)
+      advice = " The model is served from the recording, so your code changed this call: its new output can't be " +
+        "compared with a recording. Re-record, or replay mocked to test the code change. If this input doesn't affect " +
+        "the step's output, ignore those fields (step_rules).";
     if (fault)
       advice = " Past the fault the agent took a path the recording doesn't cover (a fallback it never called, or a " +
         "call whose input now carries the error), so no recorded output can stand in for it. " +
         (this._liveModelSteps ? "Record a trace of this path." : "Replay live to run model steps for real, or record a trace of this path.");
     const where = fault ? ` after an injected fault (${fault.description})` : "";
     const message =
-      `${this._liveModelSteps ? "Live replay" : "Replay"} stopped at step ${position} ('${name}')${where}: ${detail} ` +
+      `${this._liveModelSteps ? "Live replay" : this._liveToolSteps ? "Tool-live replay" : "Replay"} stopped at step ${position} ('${name}')${where}: ${detail} ` +
       "The replay is inconclusive: it neither passed nor failed." + advice;
 
     const stop: ReplayStop = {

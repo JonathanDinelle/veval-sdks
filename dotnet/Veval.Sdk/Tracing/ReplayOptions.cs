@@ -16,6 +16,17 @@ public class ReplayOptions
     /// <see cref="MockLlmResponses"/>. The replay fails if no step ran live.
     /// </summary>
     public bool LiveModelSteps { get; set; }
+
+    /// <summary>
+    /// Run steps recorded as <c>tool</c> for real and serve every other step, model steps included, from the recording.
+    /// The model's path stays the recorded one, so each tool is called with its recorded input, and its new output is
+    /// compared with the recorded output: a difference fails the replay. Catches a changed tool, which mocked and live
+    /// replays serve from the recording and never run. Only for tools whose output follows from their input (parsers,
+    /// formatters, lookups against fixed data); mark a tool that reads live state with
+    /// <see cref="ReplayStepRule.ReadsExternalState"/>. Can't be combined with <see cref="LiveModelSteps"/>. The replay
+    /// fails if no tool ran.
+    /// </summary>
+    public bool LiveToolSteps { get; set; }
     public ITraceAssertion[] Assertions { get; set; } = Array.Empty<ITraceAssertion>();
 
     /// <summary>

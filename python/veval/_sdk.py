@@ -419,14 +419,19 @@ def _require_no_running_loop(async_name: str) -> None:
 
 
 def _replay_context(trace: TraceData, options: ReplayOptions) -> VevalExecutionContext:
-    if options.faults and not options.mock_llm_responses and not options.live_model_steps:
+    if options.live_tool_steps and options.live_model_steps:
         raise ValueError(
-            "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses or live_model_steps.")
+            "ReplayOptions.live_tool_steps and live_model_steps can't be combined: one runs tools and serves the model "
+            "from the recording, the other the reverse.")
+    if options.faults and not options.mock_llm_responses and not options.live_model_steps and not options.live_tool_steps:
+        raise ValueError(
+            "ReplayOptions.faults needs a mocked or live replay: set mock_llm_responses, live_model_steps or "
+            "live_tool_steps.")
     ctx = VevalExecutionContext(f"tr_{uuid.uuid4().hex}", trace.input)
     ctx._is_replay = True
     if options.live_model_steps:
         ctx.load_mock_outputs(trace, live_model_steps=True, options=options)
-    elif options.mock_llm_responses:
+    elif options.mock_llm_responses or options.live_tool_steps:
         ctx.load_mock_outputs(trace, options=options)
     return ctx
 
@@ -461,6 +466,9 @@ def _replay_result(
         binding_failure = None if error or fidelity is None else fidelity._failure(trace.trace_id, options.live_model_steps)
         if binding_failure:
             failures.append(binding_failure)
+        # A changed tool output is reported even when the agent then raised: the change is likely why it did.
+        if fidelity is not None:
+            failures.extend(c.message for c in fidelity.tool_output_changes if c.message)
         # Like the binding failure: when the agent raised, the exception already explains why a fault never fired.
         if fidelity is not None and not error:
             failures.extend(fidelity._unfired_fault_failures(lambda name: sum(1 for s in ctx.steps if s.name == name)))
@@ -493,11 +501,13 @@ def _scenario_replay_options(
     assertions: list,
 ) -> ReplayOptions:
     """How a trace-backed item replays: model steps live and everything else from the recording, unless the item or
-    the whole scenario opts into mocked replay."""
-    mocked = options.mock_model_steps or item.mock_model_steps
+    the whole scenario opts into tool-live replay (which wins) or mocked replay."""
+    live_tools = options.live_tool_steps or item.live_tool_steps
+    mocked = not live_tools and (options.mock_model_steps or item.mock_model_steps)
     return ReplayOptions(
         mock_llm_responses=mocked,
-        live_model_steps=not mocked,
+        live_model_steps=not mocked and not live_tools,
+        live_tool_steps=live_tools,
         assertions=assertions,
         step_rules=_merge_step_rules(options.step_rules, item.step_rules),
         faults=[*options.faults, *item.faults],

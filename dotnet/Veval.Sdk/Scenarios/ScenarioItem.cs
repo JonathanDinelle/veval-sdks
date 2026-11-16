@@ -18,6 +18,12 @@ public class ScenarioItem
     public bool MockModelSteps { get; set; }
 
     /// <summary>
+    /// For a trace-backed item: replay it tool-live (<see cref="ReplayOptions.LiveToolSteps"/>), running its tools for
+    /// real and serving the model from the recording. Takes precedence over <see cref="MockModelSteps"/>.
+    /// </summary>
+    public bool LiveToolSteps { get; set; }
+
+    /// <summary>
     /// For a trace-backed item: <see cref="ReplayOptions.StepRules"/> for its replay. Replaces the scenario-level rule of
     /// the same step.
     /// </summary>

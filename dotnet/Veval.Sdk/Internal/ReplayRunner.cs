@@ -6,14 +6,19 @@ internal static class ReplayRunner
     public static async Task<ReplayResult> RunAsync<T>(
         TraceData trace, Func<VevalExecutionContext, Task<T>> callback, ReplayOptions options)
     {
-        if (options.Faults.Count > 0 && !options.MockLlmResponses && !options.LiveModelSteps)
+        if (options.LiveToolSteps && options.LiveModelSteps)
             throw new ArgumentException(
-                "ReplayOptions.Faults needs a mocked or live replay: set MockLlmResponses or LiveModelSteps.", nameof(options));
+                "ReplayOptions.LiveToolSteps and LiveModelSteps can't be combined: one runs tools and serves the model from " +
+                "the recording, the other the reverse.", nameof(options));
+        if (options.Faults.Count > 0 && !options.MockLlmResponses && !options.LiveModelSteps && !options.LiveToolSteps)
+            throw new ArgumentException(
+                "ReplayOptions.Faults needs a mocked or live replay: set MockLlmResponses, LiveModelSteps or LiveToolSteps.",
+                nameof(options));
 
         var ctx = new VevalExecutionContext($"tr_{Guid.NewGuid():N}", trace.Input) { IsReplay = true };
         if (options.LiveModelSteps)
             ctx.LoadMockOutputs(trace, liveModelSteps: true, options: options);
-        else if (options.MockLlmResponses)
+        else if (options.MockLlmResponses || options.LiveToolSteps)
             ctx.LoadMockOutputs(trace, options: options);
 
         var startedAt = DateTime.UtcNow;
@@ -47,6 +52,9 @@ internal static class ReplayRunner
             if (error != null) failures.Add($"Replay threw exception: {error}");
             if (error == null && ctx.ReplayFidelity?.Failure(trace.TraceId, options.LiveModelSteps) is { } bindingFailure)
                 failures.Add(bindingFailure);
+            // A changed tool output is reported even when the agent then threw: the change is likely why it did.
+            if (ctx.ReplayFidelity is { } checks)
+                failures.AddRange(checks.ToolOutputChanges.Select(c => c.Message!));
             // Like the binding failure: when the agent threw, the exception already explains why a fault never fired.
             if (error == null && ctx.ReplayFidelity is { } fidelity)
                 failures.AddRange(fidelity.UnfiredFaultFailures(name => ctx.Steps.Count(s => s.Name == name)));

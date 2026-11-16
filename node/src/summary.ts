@@ -12,7 +12,10 @@ export function replaySummary(failures: string[], stop: ReplayStop | null | unde
 
   const used = new Set(fidelity.bindings.filter((b) => b.recorded_index !== null).map((b) => b.recorded_index)).size;
   const recorded = used + fidelity.unused.length;
-  const faults = fidelity.faults.length > 0 ? `${count(fidelity.faulted, "fault")} injected, ` : "";
+  let faults = fidelity.faults.length > 0 ? `${count(fidelity.faulted, "fault")} injected, ` : "";
+  if (fidelity.live_tool_steps)
+    faults += `${fidelity.tool_checks.length} tools replayed, ${fidelity.not_replayed} not replayed, ` +
+      `${count(fidelity.tool_output_changes.length, "output")} changed, `;
   return `${head} — ${used}/${recorded} recorded steps used, ${fidelity.diverged} diverged but served, ${fidelity.live} live, ` +
     faults + (stop ? "left the path" : "stayed on path");
 }
